@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "default_case_set": "recommended_progression",
+  "case_sets": [
+    {
+      "id": "recommended_smoke",
+      "label": "Recommended Smoke Regression",
+      "path": "recommended_smoke.json",
+      "description": "Fast 1-tick regression comparing registry default, recommended presets, and the MiniMax smoke benchmark.",
+      "score_profile": "latency_smoke",
+      "tags": ["recommended", "smoke", "regression"]
+    },
+    {
+      "id": "recommended_progression",
+      "label": "Recommended Progression Regression",
+      "path": "recommended_progression.json",
+      "description": "3-tick regression comparing the promoted recommended strategies against the registry default and the MiniMax smoke benchmark.",
+      "score_profile": "progression_mini",
+      "tags": ["recommended", "progression", "regression"]
+    },
+    {
+      "id": "recommended_stability",
+      "label": "Recommended Stability Goldens",
+      "path": "recommended_stability.json",
+      "description": "3-repeat stability suite for the durable recommended finalists plus the registry baseline.",
+      "score_profile": "progression_mini",
+      "tags": ["recommended", "stability", "golden"]
+    },
+    {
+      "id": "campaign_20260319_pair_smoke_top9",
+      "label": "Campaign 20260319 Pair Smoke Top 9",
+      "path": "campaign_20260319_pair_smoke_top9.json",
+      "description": "Promoted long-term copy of the full top-actor x top-resolver pair smoke grid from the 2026-03-19 campaign.",
+      "score_profile": "latency_smoke",
+      "tags": ["campaign", "archived", "pair-smoke"]
+    },
+    {
+      "id": "campaign_20260319_stability_goldens",
+      "label": "Campaign 20260319 Stability Goldens",
+      "path": "campaign_20260319_stability_goldens.json",
+      "description": "Promoted durable copy of the 2026-03-19 stability finalists with their long-term selectors.",
+      "score_profile": "progression_mini",
+      "tags": ["campaign", "archived", "stability", "golden"]
+    }
+  ]
+}

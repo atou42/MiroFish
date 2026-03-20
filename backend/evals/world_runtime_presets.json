@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "default_preset": "recommended_throughput",
+  "presets": [
+    {
+      "id": "recommended_throughput",
+      "label": "Recommended Throughput",
+      "description": "Qwen 3.5 Flash actor with Qwen 3.5 Plus resolver. Highest overall score in repeat-based stability, with more heuristic salvage than the stable GPT resolver path.",
+      "strategy_class": "default",
+      "tags": ["recommended", "throughput", "world"],
+      "recommendation": "Use when you want the highest world-turn throughput and can tolerate more heuristic salvage.",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_qwen35_plus",
+      "time_overrides": {},
+      "runtime_overrides": {
+        "intent_agents_per_tick": 4,
+        "intent_concurrency": 4,
+        "resolver_cluster_size": 2,
+        "resolver_cluster_concurrency": 2,
+        "max_active_events": 4,
+        "max_queued_events": 6,
+        "max_event_duration_ticks": 2,
+        "resolver_salvage_on_zero_accept": true,
+        "provider_preflight_check": true,
+        "provider_max_retries": 1,
+        "actor_on_failure": "defer",
+        "resolver_on_failure": "pause"
+      },
+      "evaluation": {
+        "campaign_date": "2026-03-19",
+        "stage": "stability",
+        "overall": 72.4,
+        "progression": 75.6,
+        "resilience": 74.6,
+        "speed": 50.3,
+        "events_started": 6.333,
+        "events_completed": 4.333,
+        "provider_wait_total_s": 1.333,
+        "salvage_tick_rate": 0.444
+      },
+      "notes": [
+        "Best default preset from the full world-model evaluation campaign.",
+        "Higher salvage rate than the GPT resolver preset, but stronger raw progression output."
+      ]
+    },
+    {
+      "id": "recommended_stable",
+      "label": "Recommended Stable",
+      "description": "Qwen 3.5 Flash actor with GPT-5.4 deep resolver. Slightly lower overall than the throughput preset, but materially cleaner and more stable repeat behavior.",
+      "strategy_class": "stable",
+      "tags": ["recommended", "stable", "world"],
+      "recommendation": "Use when you care more about stable progression, lower provider friction, and lower salvage rate.",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "time_overrides": {},
+      "runtime_overrides": {
+        "intent_agents_per_tick": 4,
+        "intent_concurrency": 4,
+        "resolver_cluster_size": 2,
+        "resolver_cluster_concurrency": 2,
+        "max_active_events": 4,
+        "max_queued_events": 6,
+        "max_event_duration_ticks": 2,
+        "resolver_salvage_on_zero_accept": true,
+        "provider_preflight_check": true,
+        "provider_max_retries": 1,
+        "actor_on_failure": "defer",
+        "resolver_on_failure": "pause"
+      },
+      "evaluation": {
+        "campaign_date": "2026-03-19",
+        "stage": "stability",
+        "overall": 72.1,
+        "progression": 69.8,
+        "resilience": 89.5,
+        "speed": 50.5,
+        "events_started": 5.0,
+        "events_completed": 4.333,
+        "provider_wait_total_s": 0.0,
+        "salvage_tick_rate": 0.222
+      },
+      "notes": [
+        "Best stable progression preset from the full world-model evaluation campaign.",
+        "Also the fastest viable preset after filtering out zero-completion smoke-only winners."
+      ]
+    },
+    {
+      "id": "slow_but_stable",
+      "label": "Slow But Stable",
+      "description": "Qwen 3.5 Flash actor with GPT-5.4 deep resolver, but with a larger request budget and lower concurrency so slow high-quality resolver calls can still commit ticks.",
+      "strategy_class": "stable",
+      "tags": ["stable", "latency-tolerant", "world"],
+      "recommendation": "Use when you want to keep the GPT-5.4 deep resolver and are willing to trade throughput for fewer timeout-induced stalls.",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "time_overrides": {},
+      "runtime_overrides": {
+        "intent_agents_per_tick": 3,
+        "intent_concurrency": 2,
+        "resolver_cluster_size": 3,
+        "resolver_cluster_concurrency": 1,
+        "max_active_events": 3,
+        "max_queued_events": 5,
+        "max_event_duration_ticks": 2,
+        "resolver_salvage_on_zero_accept": true,
+        "provider_preflight_check": true,
+        "provider_max_retries": 1,
+        "provider_backoff_seconds": 5,
+        "provider_healthcheck_timeout": 45,
+        "provider_request_timeout": 180,
+        "actor_on_failure": "defer",
+        "resolver_on_failure": "pause"
+      },
+      "evaluation": {
+        "campaign_date": "2026-03-19",
+        "stage": "post-eval_operational_tuning"
+      },
+      "notes": [
+        "Not the fastest preset; this one exists for runs where request latency is acceptable but timeout-induced restarts are not.",
+        "Separates request timeout from health-check timeout so GPT-5.4 deep can finish slower resolver turns without being treated as dead."
+      ]
+    },
+    {
+      "id": "smoke_benchmark_minimax",
+      "label": "Smoke Benchmark MiniMax",
+      "description": "Qwen 3.5 Flash actor with MiniMax resolver. Useful for one-tick smoke or triage benchmarking, but not recommended for real progression.",
+      "strategy_class": "benchmark",
+      "tags": ["benchmark", "smoke", "world"],
+      "recommendation": "Use only for quick one-tick benchmark comparisons or smoke checks.",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_minimax_m25",
+      "time_overrides": {},
+      "runtime_overrides": {
+        "intent_agents_per_tick": 4,
+        "intent_concurrency": 4,
+        "resolver_cluster_size": 2,
+        "resolver_cluster_concurrency": 2,
+        "max_active_events": 4,
+        "max_queued_events": 6,
+        "max_event_duration_ticks": 3,
+        "resolver_salvage_on_zero_accept": true,
+        "provider_preflight_check": true,
+        "provider_max_retries": 1,
+        "actor_on_failure": "defer",
+        "resolver_on_failure": "pause"
+      },
+      "evaluation": {
+        "campaign_date": "2026-03-19",
+        "stage": "pair_smoke",
+        "overall": 67.5,
+        "progression": 65.4,
+        "resilience": 100.0,
+        "speed": 46.9,
+        "events_started": 2.0,
+        "events_completed": 0.0,
+        "provider_wait_total_s": 0.0,
+        "salvage_tick_rate": 0.0
+      },
+      "notes": [
+        "Looks fast in pair smoke but completed zero events in that run.",
+        "Collapsed on end-to-end latency during progression, so keep it out of production presets."
+      ]
+    },
+    {
+      "id": "registry_default",
+      "label": "Registry Default",
+      "description": "Use the current llm_registry world routes and agent selectors without forcing the evaluated preset routing.",
+      "strategy_class": "baseline",
+      "tags": ["baseline", "registry", "world"],
+      "recommendation": "Use for comparison against the repository's current default model routing.",
+      "preserve_registry_agent_selectors": true,
+      "actor_selector": "WORLD_AGENT",
+      "resolver_selector": "WORLD_RESOLVER",
+      "time_overrides": {},
+      "runtime_overrides": {},
+      "evaluation": {},
+      "notes": [
+        "This preset keeps the existing registry-driven world routing behavior.",
+        "Useful as a baseline when you want to compare the repository default against evaluated presets."
+      ]
+    }
+  ]
+}

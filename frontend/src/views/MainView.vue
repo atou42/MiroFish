@@ -203,12 +203,16 @@ const handleNewProject = async () => {
     const formData = new FormData()
     pending.files.forEach(f => formData.append('files', f))
     formData.append('simulation_requirement', pending.simulationRequirement)
+    formData.append('simulation_mode', pending.simulationMode || 'social')
     
     const res = await generateOntology(formData)
     if (res.success) {
       clearPendingUpload()
       currentProjectId.value = res.data.project_id
-      projectData.value = res.data
+      projectData.value = {
+        ...res.data,
+        simulation_mode: res.data.simulation_mode || pending.simulationMode || 'social'
+      }
       
       router.replace({ name: 'Process', params: { projectId: res.data.project_id } })
       ontologyProgress.value = null

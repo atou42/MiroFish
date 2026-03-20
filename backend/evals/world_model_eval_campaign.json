@@ -1,0 +1,206 @@
+{
+  "name": "world-model-complete-campaign",
+  "description": "Staged eval campaign for world simulation: availability probe, actor smoke, resolver smoke, pair smoke, progression mini, and stability repeats.",
+  "smoke_case_workers": 3,
+  "progression_case_workers": 2,
+  "stability_case_workers": 2,
+  "selection": {
+    "actor_probe_top_n": 6,
+    "resolver_probe_top_n": 5,
+    "pair_top_actor_n": 3,
+    "pair_top_resolver_n": 3,
+    "progression_top_n": 3,
+    "stability_top_n": 2,
+    "stability_repeat_count": 3,
+    "force_actor_ids": [
+      "litellm_gpt54_fast",
+      "litellm_gpt54_balanced"
+    ],
+    "force_resolver_ids": [
+      "litellm_gpt54_balanced",
+      "litellm_gpt54_deep"
+    ]
+  },
+  "probe": {
+    "max_workers": 4,
+    "healthcheck_timeout_seconds": 15,
+    "actor_timeout_seconds": 45,
+    "resolver_timeout_seconds": 60
+  },
+  "smoke_runtime_overrides": {
+    "intent_agents_per_tick": 4,
+    "intent_concurrency": 4,
+    "resolver_cluster_size": 2,
+    "resolver_cluster_concurrency": 2,
+    "max_active_events": 4,
+    "max_queued_events": 6,
+    "max_event_duration_ticks": 3,
+    "resolver_salvage_on_zero_accept": true,
+    "provider_preflight_check": true,
+    "provider_max_retries": 1,
+    "actor_on_failure": "defer",
+    "resolver_on_failure": "pause"
+  },
+  "progression_runtime_overrides": {
+    "intent_agents_per_tick": 4,
+    "intent_concurrency": 4,
+    "resolver_cluster_size": 2,
+    "resolver_cluster_concurrency": 2,
+    "max_active_events": 4,
+    "max_queued_events": 6,
+    "max_event_duration_ticks": 2,
+    "resolver_salvage_on_zero_accept": true,
+    "provider_preflight_check": true,
+    "provider_max_retries": 1,
+    "actor_on_failure": "defer",
+    "resolver_on_failure": "pause"
+  },
+  "candidates": [
+    {
+      "id": "litellm_gpt54_fast",
+      "label": "GPT-5.4 fast / litellm",
+      "openclaw_model": "litellm/gpt-5.4",
+      "speed_mode": "fast",
+      "roles": ["actor", "resolver"],
+      "group": "litellm_gpt54_fast"
+    },
+    {
+      "id": "litellm_gpt54_balanced",
+      "label": "GPT-5.4 balanced / litellm",
+      "openclaw_model": "litellm/gpt-5.4",
+      "speed_mode": "balanced",
+      "roles": ["actor", "resolver"],
+      "group": "litellm_gpt54_balanced"
+    },
+    {
+      "id": "litellm_gpt54_deep",
+      "label": "GPT-5.4 deep / litellm",
+      "openclaw_model": "litellm/gpt-5.4",
+      "speed_mode": "deep",
+      "roles": ["actor", "resolver"],
+      "group": "litellm_gpt54_deep"
+    },
+    {
+      "id": "codexvip_gpt54_fast",
+      "label": "GPT-5.4 fast / codexvip",
+      "openclaw_model": "codexvip/gpt-5.4",
+      "speed_mode": "fast",
+      "roles": ["actor", "resolver"],
+      "group": "codexvip_gpt54_fast"
+    },
+    {
+      "id": "codexvip_gpt54_balanced",
+      "label": "GPT-5.4 balanced / codexvip",
+      "openclaw_model": "codexvip/gpt-5.4",
+      "speed_mode": "balanced",
+      "roles": ["actor", "resolver"],
+      "group": "codexvip_gpt54_balanced"
+    },
+    {
+      "id": "codexvip_gpt53_codex",
+      "label": "GPT-5.3 Codex / codexvip",
+      "openclaw_model": "codexvip/gpt-5.3-codex",
+      "speed_mode": "balanced",
+      "roles": ["actor", "resolver"],
+      "group": "codexvip_gpt53_codex"
+    },
+    {
+      "id": "litellm_claude_opus46_thinking",
+      "label": "Claude Opus 4.6 Thinking / litellm",
+      "openclaw_model": "litellm/claude-opus-4-6-thinking",
+      "roles": ["actor", "resolver"],
+      "group": "claude_opus46"
+    },
+    {
+      "id": "opus46backend_claude_opus46",
+      "label": "Claude Opus 4.6 / opus46backend",
+      "openclaw_model": "opus46backend/claude-opus-4-6",
+      "roles": ["actor", "resolver"],
+      "group": "claude_opus46"
+    },
+    {
+      "id": "zai_glm5",
+      "label": "GLM-5 / zai",
+      "openclaw_model": "zai/glm-5",
+      "roles": ["actor", "resolver"],
+      "group": "glm5"
+    },
+    {
+      "id": "aliyun_qwen35_plus",
+      "label": "Qwen 3.5 Plus / aliyun-bailian",
+      "openclaw_model": "aliyun-bailian/qwen3.5-plus",
+      "roles": ["actor", "resolver"],
+      "group": "qwen35_plus"
+    },
+    {
+      "id": "litellm_qwen35_plus",
+      "label": "Qwen 3.5 Plus / litellm",
+      "openclaw_model": "litellm/qwen3.5-plus",
+      "roles": ["actor", "resolver"],
+      "group": "qwen35_plus"
+    },
+    {
+      "id": "aliyun_qwen35_flash",
+      "label": "Qwen 3.5 Flash / aliyun-bailian",
+      "openclaw_model": "aliyun-bailian/qwen3.5-flash",
+      "roles": ["actor", "resolver"],
+      "group": "qwen35_flash"
+    },
+    {
+      "id": "litellm_qwen35_flash",
+      "label": "Qwen 3.5 Flash / litellm",
+      "openclaw_model": "litellm/qwen3.5-flash",
+      "roles": ["actor", "resolver"],
+      "group": "qwen35_flash"
+    },
+    {
+      "id": "aliyun_kimi_k25",
+      "label": "Kimi K2.5 / aliyun-bailian",
+      "openclaw_model": "aliyun-bailian/kimi-k2.5",
+      "roles": ["actor", "resolver"],
+      "group": "kimi_k25"
+    },
+    {
+      "id": "aliyun_minimax_m25",
+      "label": "MiniMax M2.5 / aliyun-bailian",
+      "openclaw_model": "aliyun-bailian/MiniMax-M2.5",
+      "roles": ["actor", "resolver"],
+      "group": "minimax_m25"
+    },
+    {
+      "id": "litellm_gemini31_pro",
+      "label": "Gemini 3.1 Pro / litellm",
+      "openclaw_model": "litellm/gemini-3.1-pro-preview",
+      "roles": ["actor", "resolver"],
+      "group": "gemini31_pro"
+    },
+    {
+      "id": "litellm_google_gemini31_pro",
+      "label": "Gemini 3.1 Pro / litellm-google",
+      "openclaw_model": "litellm-google/gemini-3.1-pro-preview",
+      "roles": ["actor", "resolver"],
+      "group": "gemini31_pro"
+    },
+    {
+      "id": "yunwu_gemini31_pro",
+      "label": "Gemini 3.1 Pro / yunwu",
+      "openclaw_model": "yunwu/gemini-3.1-pro-preview",
+      "roles": ["actor", "resolver"],
+      "group": "gemini31_pro"
+    },
+    {
+      "id": "litellm_gemini3_pro",
+      "label": "Gemini 3 Pro / litellm",
+      "openclaw_model": "litellm/gemini-3-pro-preview",
+      "roles": ["actor", "resolver"],
+      "group": "gemini3_pro"
+    },
+    {
+      "id": "bigmodel_pony_alpha2",
+      "label": "Pony Alpha 2 / bigmodel",
+      "openclaw_model": "bigmodel-pony/pony-alpha-2",
+      "roles": ["actor", "resolver"],
+      "group": "pony_alpha2"
+    }
+  ]
+}

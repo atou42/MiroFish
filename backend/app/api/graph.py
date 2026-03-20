@@ -17,6 +17,7 @@ from ..utils.file_parser import FileParser
 from ..utils.logger import get_logger
 from ..models.task import TaskManager, TaskStatus
 from ..models.project import ProjectManager, ProjectStatus
+from ..models.simulation_mode import SimulationMode
 
 # 获取日志器
 logger = get_logger('mirofish.api')
@@ -153,6 +154,7 @@ def generate_ontology():
         simulation_requirement = request.form.get('simulation_requirement', '')
         project_name = request.form.get('project_name', 'Unnamed Project')
         additional_context = request.form.get('additional_context', '')
+        simulation_mode = SimulationMode.normalize(request.form.get('simulation_mode')).value
         
         logger.debug(f"项目名称: {project_name}")
         logger.debug(f"模拟需求: {simulation_requirement[:100]}...")
@@ -172,7 +174,10 @@ def generate_ontology():
             }), 400
         
         # 创建项目
-        project = ProjectManager.create_project(name=project_name)
+        project = ProjectManager.create_project(
+            name=project_name,
+            simulation_mode=simulation_mode
+        )
         project.simulation_requirement = simulation_requirement
         logger.info(f"创建项目: {project.project_id}")
         
@@ -217,7 +222,8 @@ def generate_ontology():
         ontology = generator.generate(
             document_texts=document_texts,
             simulation_requirement=simulation_requirement,
-            additional_context=additional_context if additional_context else None
+            additional_context=additional_context if additional_context else None,
+            simulation_mode=simulation_mode
         )
         
         # 保存本体到项目
@@ -239,6 +245,7 @@ def generate_ontology():
             "data": {
                 "project_id": project.project_id,
                 "project_name": project.name,
+                "simulation_mode": project.simulation_mode,
                 "ontology": project.ontology,
                 "analysis_summary": project.analysis_summary,
                 "files": project.files,

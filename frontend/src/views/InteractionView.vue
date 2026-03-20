@@ -52,6 +52,7 @@
         <Step5Interaction
           :reportId="currentReportId"
           :simulationId="simulationId"
+          :simulationMode="simulationMode"
           :systemLogs="systemLogs"
           @add-log="addLog"
           @update-status="updateStatus"
@@ -89,6 +90,7 @@ const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
 const currentStatus = ref('ready') // ready | processing | completed | error
+const simulationMode = ref('social')
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -153,12 +155,14 @@ const loadReportData = async () => {
         const simRes = await getSimulation(simulationId.value)
         if (simRes.success && simRes.data) {
           const simData = simRes.data
+          simulationMode.value = simData.simulation_mode || 'social'
           
           // 获取 project 信息
           if (simData.project_id) {
             const projRes = await getProject(simData.project_id)
             if (projRes.success && projRes.data) {
               projectData.value = projRes.data
+              simulationMode.value = projRes.data.simulation_mode || simulationMode.value
               addLog(`项目加载成功: ${projRes.data.project_id}`)
               
               // 获取 graph 数据
@@ -209,7 +213,6 @@ watch(() => route.params.reportId, (newId) => {
 
 onMounted(() => {
   addLog('InteractionView 初始化')
-  loadReportData()
 })
 </script>
 

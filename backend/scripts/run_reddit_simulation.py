@@ -46,6 +46,7 @@ else:
     if os.path.exists(_backend_env):
         load_dotenv(_backend_env)
 
+from app.config import Config
 
 import re
 
@@ -435,17 +436,17 @@ class RedditSimulationRunner:
         """
         创建LLM模型
         
-        统一使用项目根目录 .env 文件中的配置（优先级最高）：
-        - LLM_API_KEY: API密钥
-        - LLM_BASE_URL: API基础URL
-        - LLM_MODEL_NAME: 模型名称
+        优先使用 llm_registry.json 中的 reddit_agent route；
+        未配置时回退到 legacy LLM_* env。
         """
-        # 优先从 .env 读取配置
-        llm_api_key = os.environ.get("LLM_API_KEY", "")
-        llm_base_url = os.environ.get("LLM_BASE_URL", "")
-        llm_model = os.environ.get("LLM_MODEL_NAME", "")
+        resolved = Config.get_llm_config("REDDIT_AGENT")
+        llm_api_key = resolved.get("api_key") or os.environ.get("LLM_API_KEY", "")
+        llm_base_url = resolved.get("base_url") or os.environ.get("LLM_BASE_URL", "")
+        llm_model = resolved.get("model_name") or os.environ.get("LLM_MODEL_NAME", "")
+        provider_id = resolved.get("provider_id") or "legacy"
+        profile_id = resolved.get("profile_id") or "env-default"
         
-        # 如果 .env 中没有，则使用 config 作为备用
+        # 如果 registry / .env 中没有，则使用 config 作为备用
         if not llm_model:
             llm_model = self.config.get("llm_model", "gpt-4o-mini")
         
@@ -454,12 +455,15 @@ class RedditSimulationRunner:
             os.environ["OPENAI_API_KEY"] = llm_api_key
         
         if not os.environ.get("OPENAI_API_KEY"):
-            raise ValueError("缺少 API Key 配置，请在项目根目录 .env 文件中设置 LLM_API_KEY")
+            raise ValueError("缺少 API Key 配置，请检查 llm_registry.json 或 .env")
         
         if llm_base_url:
             os.environ["OPENAI_API_BASE_URL"] = llm_base_url
         
-        print(f"LLM配置: model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else '默认'}...")
+        print(
+            f"LLM配置[reddit_agent]: profile={profile_id}, provider={provider_id}, "
+            f"model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else '默认'}..."
+        )
         
         return ModelFactory.create(
             model_platform=ModelPlatformType.OPENAI,
@@ -766,4 +770,3 @@ if __name__ == "__main__":
         pass
     finally:
         print("模拟进程已退出")
-

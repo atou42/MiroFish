@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "name": "world-model-matrix",
+  "description": "Candidate pool and stage policy for world-mode model evaluation.",
+  "base_actor_selector": "eval_litellm_gpt54_fast",
+  "base_resolver_selector": "eval_litellm_gpt54_balanced",
+  "probe": {
+    "health_timeout_seconds": 12,
+    "json_timeout_seconds": 25,
+    "max_tokens": 256
+  },
+  "limits": {
+    "actor_smoke_max": 12,
+    "resolver_smoke_max": 8,
+    "combo_actor_top": 3,
+    "combo_resolver_top": 2,
+    "progression_top": 3,
+    "finalists_top": 2,
+    "final_repeat_count": 2
+  },
+  "candidates": [
+    {
+      "id": "litellm-gpt54-fast",
+      "selector": "eval_litellm_gpt54_fast",
+      "label": "GPT-5.4 LiteLLM fast",
+      "family": "gpt-5.4",
+      "provider": "litellm",
+      "priority": 120,
+      "roles": ["actor"]
+    },
+    {
+      "id": "litellm-gpt54-balanced",
+      "selector": "eval_litellm_gpt54_balanced",
+      "label": "GPT-5.4 LiteLLM balanced",
+      "family": "gpt-5.4",
+      "provider": "litellm",
+      "priority": 130,
+      "roles": ["actor", "resolver"]
+    },
+    {
+      "id": "litellm-gpt54-deep",
+      "selector": "eval_litellm_gpt54_deep",
+      "label": "GPT-5.4 LiteLLM deep",
+      "family": "gpt-5.4",
+      "provider": "litellm",
+      "priority": 110,
+      "roles": ["resolver"]
+    },
+    {
+      "id": "codexvip-gpt54-fast",
+      "selector": "eval_codexvip_gpt54_fast",
+      "label": "GPT-5.4 CodexVIP fast",
+      "family": "gpt-5.4",
+      "provider": "codexvip",
+      "priority": 118,
+      "roles": ["actor"]
+    },
+    {
+      "id": "codexvip-gpt54-balanced",
+      "selector": "eval_codexvip_gpt54_balanced",
+      "label": "GPT-5.4 CodexVIP balanced",
+      "family": "gpt-5.4",
+      "provider": "codexvip",
+      "priority": 128,
+      "roles": ["actor", "resolver"]
+    },
+    {
+      "id": "codexvip-gpt54-deep",
+      "selector": "eval_codexvip_gpt54_deep",
+      "label": "GPT-5.4 CodexVIP deep",
+      "family": "gpt-5.4",
+      "provider": "codexvip",
+      "priority": 108,
+      "roles": ["resolver"]
+    },
+    {
+      "id": "codexvip-gpt53-balanced",
+      "selector": "eval_codexvip_gpt53_balanced",
+      "label": "GPT-5.3 Codex balanced",
+      "family": "gpt-5.3",
+      "provider": "codexvip",
+      "priority": 102,
+      "roles": ["actor", "resolver"]
+    },
+    {
+      "id": "codexvip-gpt53-deep",
+      "selector": "eval_codexvip_gpt53_deep",
+      "label": "GPT-5.3 Codex deep",
+      "family": "gpt-5.3",
+      "provider": "codexvip",
+      "priority": 96,
+      "roles": ["resolver"]
+    },
+    {
+      "id": "litellm-gemini31pro",
+      "selector": "eval_litellm_gemini31pro",
+      "label": "Gemini 3.1 Pro LiteLLM",
+      "family": "gemini-3.1",
+      "provider": "litellm",
+      "priority": 98,
+      "roles": ["actor", "resolver"]
+    },
+    {
+      "id": "litellm-gemini3pro",
+      "selector": "eval_litellm_gemini3pro",
+      "label": "Gemini 3 Pro LiteLLM",
+      "family": "gemini-3",
+      "provider": "litellm",
+      "priority": 86,
+      "roles": ["actor"]
+    },
+    {
+      "id": "zai-glm5",
+      "selector": "eval_zai_glm5",
+      "label": "GLM-5 ZAI",
+      "family": "glm-5",
+      "provider": "zai",
+      "priority": 100,
+      "roles": ["actor", "resolver"]
+    },
+    {
+      "id": "aliyun-qwen35-plus",
+      "selector": "eval_aliyun_qwen35_plus",
+      "label": "Qwen 3.5 Plus Aliyun",
+      "family": "qwen-3.5",
+      "provider": "aliyun-bailian",
+      "priority": 94,
+      "roles": ["actor", "resolver"]
+    },
+    {
+      "id": "aliyun-qwen35-flash",
+      "selector": "eval_aliyun_qwen35_flash",
+      "label": "Qwen 3.5 Flash Aliyun",
+      "family": "qwen-3.5",
+      "provider": "aliyun-bailian",
+      "priority": 82,
+      "roles": ["actor"]
+    },
+    {
+      "id": "aliyun-kimi-k25",
+      "selector": "eval_aliyun_kimi_k25",
+      "label": "Kimi K2.5 Aliyun",
+      "family": "kimi-k2.5",
+      "provider": "aliyun-bailian",
+      "priority": 88,
+      "roles": ["actor"]
+    },
+    {
+      "id": "aliyun-minimax-m25",
+      "selector": "eval_aliyun_minimax_m25",
+      "label": "MiniMax M2.5 Aliyun",
+      "family": "minimax-m2.5",
+      "provider": "aliyun-bailian",
+      "priority": 84,
+      "roles": ["actor"]
+    },
+    {
+      "id": "pony-alpha2",
+      "selector": "eval_pony_alpha2",
+      "label": "Pony Alpha 2 BigModel",
+      "family": "pony-alpha-2",
+      "provider": "bigmodel-pony",
+      "priority": 80,
+      "roles": ["actor"]
+    },
+    {
+      "id": "litellm-claude-opus-thinking",
+      "selector": "eval_litellm_claude_opus_thinking",
+      "label": "Claude Opus 4.6 Thinking LiteLLM",
+      "family": "claude-opus-4.6",
+      "provider": "litellm",
+      "priority": 92,
+      "roles": ["actor", "resolver"]
+    },
+    {
+      "id": "xiavier-claude-opus46",
+      "selector": "eval_xiavier_claude_opus46",
+      "label": "Claude Opus 4.6 Xiavier",
+      "family": "claude-opus-4.6",
+      "provider": "xiavier",
+      "priority": 90,
+      "roles": ["actor", "resolver"]
+    }
+  ]
+}

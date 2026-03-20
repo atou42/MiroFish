@@ -16,9 +16,8 @@ from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
-from openai import OpenAI
-
 from ..config import Config
+from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from .zep_entity_reader import EntityNode, ZepEntityReader
 
@@ -167,6 +166,8 @@ class SimulationParameters:
     # LLM配置
     llm_model: str = ""
     llm_base_url: str = ""
+    llm_provider: str = ""
+    llm_profile: str = ""
     
     # 生成元数据
     generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -187,6 +188,8 @@ class SimulationParameters:
             "reddit_config": asdict(self.reddit_config) if self.reddit_config else None,
             "llm_model": self.llm_model,
             "llm_base_url": self.llm_base_url,
+            "llm_provider": self.llm_provider,
+            "llm_profile": self.llm_profile,
             "generated_at": self.generated_at,
             "generation_reasoning": self.generation_reasoning,
         }
@@ -225,19 +228,23 @@ class SimulationConfigGenerator:
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model_name: Optional[str] = None
+        model_name: Optional[str] = None,
+        llm_client: Optional[LLMClient] = None,
     ):
-        self.api_key = api_key or Config.LLM_API_KEY
-        self.base_url = base_url or Config.LLM_BASE_URL
-        self.model_name = model_name or Config.LLM_MODEL_NAME
-        
-        if not self.api_key:
-            raise ValueError("LLM_API_KEY 未配置")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
+        if llm_client is not None:
+            self.llm = llm_client
+        elif any([api_key, base_url, model_name]):
+            self.llm = LLMClient(
+                api_key=api_key,
+                base_url=base_url,
+                model=model_name,
+            )
+        else:
+            self.llm = LLMClient.from_namespace("SIMULATION_CONFIG")
+
+        self.api_key = self.llm.api_key
+        self.base_url = self.llm.base_url
+        self.model_name = self.llm.model
     
     def generate_config(
         self,
@@ -370,6 +377,8 @@ class SimulationConfigGenerator:
             reddit_config=reddit_config,
             llm_model=self.model_name,
             llm_base_url=self.base_url,
+            llm_provider=self.llm.provider_id or "",
+            llm_profile=self.llm.profile_id or "",
             generation_reasoning=" | ".join(reasoning_parts)
         )
         
@@ -439,25 +448,16 @@ class SimulationConfigGenerator:
         
         for attempt in range(max_attempts):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
+                content = self.llm.chat(
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ],
                     response_format={"type": "json_object"},
-                    temperature=0.7 - (attempt * 0.1)  # 每次重试降低温度
-                    # 不设置max_tokens，让LLM自由发挥
+                    temperature=0.7 - (attempt * 0.1),
+                    max_tokens=4096,
                 )
-                
-                content = response.choices[0].message.content
-                finish_reason = response.choices[0].finish_reason
-                
-                # 检查是否被截断
-                if finish_reason == 'length':
-                    logger.warning(f"LLM输出被截断 (attempt {attempt+1})")
-                    content = self._fix_truncated_json(content)
-                
+
                 # 尝试解析JSON
                 try:
                     return json.loads(content)
@@ -984,4 +984,3 @@ class SimulationConfigGenerator:
                 "influence_weight": 1.0
             }
     
-

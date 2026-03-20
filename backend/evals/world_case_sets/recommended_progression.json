@@ -1,0 +1,67 @@
+{
+  "case_set_id": "recommended_progression",
+  "case_set_label": "Recommended Progression Regression",
+  "name": "world-case-set-recommended-progression",
+  "description": "3-tick regression for the durable recommended cases against the registry default and the MiniMax smoke benchmark.",
+  "source_campaign_dir": "/Users/atou/MiroFish/backend/uploads/evals/world-model-campaign-20260319-122201",
+  "selector_strategy": "Use persistent route selectors for baseline and persistent eval_* selectors for promoted cases.",
+  "score_profile": "progression_mini",
+  "shared_max_rounds": 3,
+  "shared_repeat_count": 1,
+  "shared_rewrite_agent_selectors": true,
+  "shared_runtime_overrides": {
+    "intent_agents_per_tick": 4,
+    "intent_concurrency": 4,
+    "resolver_cluster_size": 2,
+    "resolver_cluster_concurrency": 2,
+    "max_active_events": 4,
+    "max_queued_events": 6,
+    "max_event_duration_ticks": 2,
+    "resolver_salvage_on_zero_accept": true,
+    "provider_preflight_check": true,
+    "provider_max_retries": 1,
+    "actor_on_failure": "defer",
+    "resolver_on_failure": "pause"
+  },
+  "cases": [
+    {
+      "case_id": "registry-default-route",
+      "label": "Registry Default Route",
+      "actor_selector": "world_agent",
+      "resolver_selector": "world_resolver",
+      "notes": "Moving baseline for the repository's current world routing.",
+      "preset_id": "registry_default",
+      "selector_mode": "route"
+    },
+    {
+      "case_id": "recommended-throughput",
+      "label": "Recommended Throughput",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_qwen35_plus",
+      "notes": "Primary throughput recommendation promoted from the 2026-03-19 stability winner.",
+      "preset_id": "recommended_throughput",
+      "source_stage": "stability",
+      "source_case_id": "stability-progression-pair-actor-aliyun-qwen35-flash-resolver-aliyun-qwen35-plus"
+    },
+    {
+      "case_id": "recommended-stable",
+      "label": "Recommended Stable",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "notes": "Primary stability recommendation promoted from the 2026-03-19 clean finalist.",
+      "preset_id": "recommended_stable",
+      "source_stage": "stability",
+      "source_case_id": "stability-progression-pair-actor-aliyun-qwen35-flash-resolver-litellm-gpt54-deep"
+    },
+    {
+      "case_id": "smoke-benchmark-minimax",
+      "label": "Smoke Benchmark MiniMax",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_minimax_m25",
+      "notes": "Included as an anti-pattern canary. If it suddenly wins real progression, the provider landscape probably changed.",
+      "preset_id": "smoke_benchmark_minimax",
+      "source_stage": "pair_smoke",
+      "source_case_id": "pair-actor-aliyun-qwen35-flash-resolver-aliyun-minimax-m25"
+    }
+  ]
+}

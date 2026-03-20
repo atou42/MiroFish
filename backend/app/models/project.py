@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from ..config import Config
+from .simulation_mode import SimulationMode
 
 
 class ProjectStatus(str, Enum):
@@ -46,6 +47,7 @@ class Project:
     
     # 配置
     simulation_requirement: Optional[str] = None
+    simulation_mode: str = SimulationMode.SOCIAL.value
     chunk_size: int = 500
     chunk_overlap: int = 50
     
@@ -67,6 +69,7 @@ class Project:
             "graph_id": self.graph_id,
             "graph_build_task_id": self.graph_build_task_id,
             "simulation_requirement": self.simulation_requirement,
+            "simulation_mode": self.simulation_mode,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "error": self.error
@@ -92,6 +95,7 @@ class Project:
             graph_id=data.get('graph_id'),
             graph_build_task_id=data.get('graph_build_task_id'),
             simulation_requirement=data.get('simulation_requirement'),
+            simulation_mode=SimulationMode.normalize(data.get('simulation_mode')).value,
             chunk_size=data.get('chunk_size', 500),
             chunk_overlap=data.get('chunk_overlap', 50),
             error=data.get('error')
@@ -130,12 +134,17 @@ class ProjectManager:
         return os.path.join(cls._get_project_dir(project_id), 'extracted_text.txt')
     
     @classmethod
-    def create_project(cls, name: str = "Unnamed Project") -> Project:
+    def create_project(
+        cls,
+        name: str = "Unnamed Project",
+        simulation_mode: str = SimulationMode.SOCIAL.value
+    ) -> Project:
         """
         创建新项目
         
         Args:
             name: 项目名称
+            simulation_mode: 模拟模式
             
         Returns:
             新创建的Project对象
@@ -150,7 +159,8 @@ class ProjectManager:
             name=name,
             status=ProjectStatus.CREATED,
             created_at=now,
-            updated_at=now
+            updated_at=now,
+            simulation_mode=SimulationMode.normalize(simulation_mode).value
         )
         
         # 创建项目目录结构
@@ -302,4 +312,3 @@ class ProjectManager:
             for f in os.listdir(files_dir) 
             if os.path.isfile(os.path.join(files_dir, f))
         ]
-

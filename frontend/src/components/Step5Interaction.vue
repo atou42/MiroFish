@@ -8,7 +8,7 @@
           <!-- Report Header -->
           <div class="report-header-block">
             <div class="report-meta">
-              <span class="report-tag">Prediction Report</span>
+              <span class="report-tag">{{ isWorldMode ? 'World Evolution Report' : 'Prediction Report' }}</span>
               <span class="report-id">ID: {{ reportId || 'REF-2024-X92' }}</span>
             </div>
             <h1 class="main-title">{{ reportOutline.title }}</h1>
@@ -86,7 +86,9 @@
           </svg>
           <div class="action-bar-text">
             <span class="action-bar-title">Interactive Tools</span>
-            <span class="action-bar-subtitle mono">{{ profiles.length }} agents available</span>
+            <span class="action-bar-subtitle mono">
+              {{ isWorldMode ? 'world mode / report agent only' : `${profiles.length} agents available` }}
+            </span>
           </div>
         </div>
           <div class="action-bar-tabs">
@@ -100,7 +102,7 @@
               </svg>
               <span>与Report Agent对话</span>
             </button>
-            <div class="agent-dropdown" v-if="profiles.length > 0">
+            <div class="agent-dropdown" v-if="!isWorldMode && profiles.length > 0">
               <button 
                 class="tab-pill agent-pill"
                 :class="{ active: activeTab === 'chat' && chatTarget === 'agent' }"
@@ -131,8 +133,9 @@
                 </div>
               </div>
             </div>
-            <div class="tab-divider"></div>
+            <div v-if="!isWorldMode" class="tab-divider"></div>
             <button 
+              v-if="!isWorldMode"
               class="tab-pill survey-pill"
               :class="{ active: activeTab === 'survey' }"
               @click="selectSurveyTab"
@@ -155,7 +158,9 @@
               <div class="tools-card-avatar">R</div>
               <div class="tools-card-info">
                 <div class="tools-card-name">Report Agent - Chat</div>
-                <div class="tools-card-subtitle">报告生成智能体的快速对话版本，可调用 4 种专业工具，拥有MiroFish的完整记忆</div>
+                <div class="tools-card-subtitle">
+                  {{ isWorldMode ? 'world 模式下使用事件日志与报告上下文进行问答' : '报告生成智能体的快速对话版本，可调用 4 种专业工具，拥有MiroFish的完整记忆' }}
+                </div>
               </div>
               <button class="tools-card-toggle" @click="showToolsDetail = !showToolsDetail">
                 <svg :class="{ 'is-expanded': showToolsDetail }" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
@@ -199,7 +204,7 @@
                     <div class="tool-desc">基于 GraphRAG 的即时查询接口，优化索引效率，用于快速提取具体的节点属性与离散事实</div>
                   </div>
                 </div>
-                <div class="tool-item tool-green">
+                <div v-if="!isWorldMode" class="tool-item tool-green">
                   <div class="tool-icon-wrapper">
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
@@ -417,7 +422,11 @@ import { interviewAgents, getSimulationProfilesRealtime } from '../api/simulatio
 
 const props = defineProps({
   reportId: String,
-  simulationId: String
+  simulationId: String,
+  simulationMode: {
+    type: String,
+    default: 'social'
+  }
 })
 
 const emit = defineEmits(['add-log', 'update-status'])
@@ -451,6 +460,7 @@ const generatedSections = ref({})
 const collapsedSections = ref(new Set())
 const currentSectionIndex = ref(null)
 const profiles = ref([])
+const isWorldMode = computed(() => props.simulationMode === 'world')
 
 // Helper Methods
 const isSectionCompleted = (sectionIndex) => {
@@ -510,6 +520,7 @@ const selectReportAgentChat = () => {
 }
 
 const selectSurveyTab = () => {
+  if (isWorldMode.value) return
   activeTab.value = 'survey'
   selectedAgent.value = null
   selectedAgentIndex.value = null
@@ -517,6 +528,7 @@ const selectSurveyTab = () => {
 }
 
 const toggleAgentDropdown = () => {
+  if (isWorldMode.value) return
   showAgentDropdown.value = !showAgentDropdown.value
   if (showAgentDropdown.value) {
     activeTab.value = 'chat'
@@ -525,6 +537,7 @@ const toggleAgentDropdown = () => {
 }
 
 const selectAgent = (agent, idx) => {
+  if (isWorldMode.value) return
   // 保存当前对话记录
   saveChatHistory()
   
@@ -707,6 +720,9 @@ const sendToReportAgent = async (message) => {
 }
 
 const sendToAgent = async (message) => {
+  if (isWorldMode.value) {
+    throw new Error('world 模式暂不支持与个体直接对话')
+  }
   if (!selectedAgent.value || selectedAgentIndex.value === null) {
     throw new Error('请先选择一个模拟个体')
   }
@@ -800,6 +816,7 @@ const clearAgentSelection = () => {
 }
 
 const submitSurvey = async () => {
+  if (isWorldMode.value) return
   if (selectedAgents.value.size === 0 || !surveyQuestion.value.trim()) return
   
   isSurveying.value = true
@@ -913,6 +930,10 @@ const loadAgentLogs = async () => {
 
 const loadProfiles = async () => {
   if (!props.simulationId) return
+  if (isWorldMode.value) {
+    profiles.value = []
+    return
+  }
   
   try {
     const res = await getSimulationProfilesRealtime(props.simulationId, 'reddit')
@@ -937,7 +958,9 @@ const handleClickOutside = (e) => {
 onMounted(() => {
   addLog('Step5 深度互动初始化')
   loadReportData()
-  loadProfiles()
+  if (!isWorldMode.value) {
+    loadProfiles()
+  }
   document.addEventListener('click', handleClickOutside)
 })
 
@@ -956,6 +979,22 @@ watch(() => props.simulationId, (newId) => {
     loadProfiles()
   }
 }, { immediate: true })
+
+watch(() => props.simulationMode, (mode) => {
+  if (mode === 'world') {
+    profiles.value = []
+    selectedAgent.value = null
+    selectedAgentIndex.value = null
+    selectedAgents.value = new Set()
+    surveyResults.value = []
+    activeTab.value = 'chat'
+    chatTarget.value = 'report_agent'
+    showAgentDropdown.value = false
+    chatHistory.value = chatHistoryCache.value['report_agent'] || []
+  } else if (props.simulationId) {
+    loadProfiles()
+  }
+})
 </script>
 
 <style scoped>

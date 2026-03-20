@@ -14,6 +14,7 @@ from ..services.report_agent import ReportAgent, ReportManager, ReportStatus
 from ..services.simulation_manager import SimulationManager
 from ..models.project import ProjectManager
 from ..models.task import TaskManager, TaskStatus
+from ..models.simulation_mode import SimulationMode
 from ..utils.logger import get_logger
 
 logger = get_logger('mirofish.api.report')
@@ -104,6 +105,9 @@ def generate_report():
                 "success": False,
                 "error": "缺少模拟需求描述"
             }), 400
+        simulation_mode = SimulationMode.normalize(
+            getattr(state, "simulation_mode", None) or getattr(project, "simulation_mode", None)
+        )
         
         # 提前生成 report_id，以便立即返回给前端
         import uuid
@@ -130,11 +134,11 @@ def generate_report():
                     message="初始化Report Agent..."
                 )
                 
-                # 创建Report Agent
                 agent = ReportAgent(
                     graph_id=graph_id,
                     simulation_id=simulation_id,
-                    simulation_requirement=simulation_requirement
+                    simulation_requirement=simulation_requirement,
+                    simulation_mode=simulation_mode.value,
                 )
                 
                 # 进度回调
@@ -535,12 +539,15 @@ def chat_with_report_agent():
             }), 400
         
         simulation_requirement = project.simulation_requirement or ""
+        simulation_mode = SimulationMode.normalize(
+            getattr(state, "simulation_mode", None) or getattr(project, "simulation_mode", None)
+        )
         
-        # 创建Agent并进行对话
         agent = ReportAgent(
             graph_id=graph_id,
             simulation_id=simulation_id,
-            simulation_requirement=simulation_requirement
+            simulation_requirement=simulation_requirement,
+            simulation_mode=simulation_mode.value,
         )
         
         result = agent.chat(message=message, chat_history=chat_history)

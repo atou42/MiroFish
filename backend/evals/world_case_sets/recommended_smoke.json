@@ -1,0 +1,95 @@
+{
+  "case_set_id": "recommended_smoke",
+  "case_set_label": "Recommended Smoke Regression",
+  "name": "world-case-set-recommended-smoke",
+  "description": "1-tick regression for the durable recommended pairs plus baseline and MiniMax smoke benchmark.",
+  "source_campaign_dir": "/Users/atou/MiroFish/backend/uploads/evals/world-model-campaign-20260319-122201",
+  "selector_strategy": "Use persistent route selectors for baseline and persistent eval_* selectors for promoted cases.",
+  "score_profile": "latency_smoke",
+  "shared_max_rounds": 1,
+  "shared_repeat_count": 1,
+  "shared_rewrite_agent_selectors": true,
+  "shared_runtime_overrides": {
+    "intent_agents_per_tick": 4,
+    "intent_concurrency": 4,
+    "resolver_cluster_size": 2,
+    "resolver_cluster_concurrency": 2,
+    "max_active_events": 4,
+    "max_queued_events": 6,
+    "max_event_duration_ticks": 3,
+    "resolver_salvage_on_zero_accept": true,
+    "provider_preflight_check": true,
+    "provider_max_retries": 1,
+    "actor_on_failure": "defer",
+    "resolver_on_failure": "pause"
+  },
+  "cases": [
+    {
+      "case_id": "registry-default-route",
+      "label": "Registry Default Route",
+      "actor_selector": "world_agent",
+      "resolver_selector": "world_resolver",
+      "notes": "Tracks the repository's current llm_registry world routes as a moving baseline.",
+      "preset_id": "registry_default",
+      "selector_mode": "route"
+    },
+    {
+      "case_id": "recommended-throughput",
+      "label": "Recommended Throughput",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_qwen35_plus",
+      "notes": "Promoted from the 2026-03-19 default strategy. Best raw throughput, but higher salvage dependence.",
+      "preset_id": "recommended_throughput",
+      "source_stage": "stability",
+      "source_case_id": "stability-progression-pair-actor-aliyun-qwen35-flash-resolver-aliyun-qwen35-plus",
+      "source_metrics": {
+        "overall": 72.4,
+        "progression": 75.6,
+        "resilience": 74.6,
+        "first_event_s": 179.54,
+        "simulation_total_s": 476.937,
+        "events_completed": 4.333,
+        "salvage_tick_rate": 0.444,
+        "provider_wait_total_s": 1.333
+      }
+    },
+    {
+      "case_id": "recommended-stable",
+      "label": "Recommended Stable",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "notes": "Promoted from the 2026-03-19 fastest viable / most stable strategy. Cleaner and more stable than the throughput winner.",
+      "preset_id": "recommended_stable",
+      "source_stage": "stability",
+      "source_case_id": "stability-progression-pair-actor-aliyun-qwen35-flash-resolver-litellm-gpt54-deep",
+      "source_metrics": {
+        "overall": 72.1,
+        "progression": 69.8,
+        "resilience": 89.5,
+        "first_event_s": 153.797,
+        "simulation_total_s": 407.583,
+        "events_completed": 4.333,
+        "salvage_tick_rate": 0.222,
+        "provider_wait_total_s": 0.0
+      }
+    },
+    {
+      "case_id": "smoke-benchmark-minimax",
+      "label": "Smoke Benchmark MiniMax",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_minimax_m25",
+      "notes": "Keep as a benchmark canary only. It looked fast in pair smoke but completed zero events in that run.",
+      "preset_id": "smoke_benchmark_minimax",
+      "source_stage": "pair_smoke",
+      "source_case_id": "pair-actor-aliyun-qwen35-flash-resolver-aliyun-minimax-m25",
+      "source_metrics": {
+        "overall": 67.5,
+        "first_event_s": 116.4,
+        "simulation_total_s": 123.5,
+        "events_completed": 0.0,
+        "salvage_tick_rate": 0.0,
+        "provider_wait_total_s": 0.0
+      }
+    }
+  ]
+}

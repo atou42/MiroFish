@@ -12,6 +12,8 @@ flask-cors>=6.0.0
 # ============= LLM 相关 =============
 # OpenAI SDK（统一使用 OpenAI 格式调用 LLM）
 openai>=1.0.0
+# 允许在本机启用 SOCKS 代理时正常访问 provider
+socksio>=1.0.0
 
 # ============= Zep Cloud =============
 zep-cloud==3.13.0

@@ -1,0 +1,197 @@
+{
+  "name": "world-strategy-eval",
+  "description": "End-to-end world model strategy evaluation: preflight, actor smoke, resolver smoke, progression finalists, and repeated finals.",
+  "preflight": {
+    "health_timeout_s": 20,
+    "json_timeout_s": 30,
+    "json_probe_system": "Return a JSON object with keys ok, mode, score. Do not add any extra text.",
+    "json_probe_user": "mode=world_eval_probe; score=1; ok=true"
+  },
+  "actor_smoke": {
+    "description": "Single-tick actor sweep with a fixed balanced GPT-5.4 resolver.",
+    "shared_max_rounds": 1,
+    "shared_repeat_count": 1,
+    "score_profile": "latency_smoke",
+    "baseline_resolver_selector": "world_resolver_balanced",
+    "shared_runtime_overrides": {
+      "intent_agents_per_tick": 4,
+      "intent_concurrency": 4,
+      "resolver_cluster_size": 2,
+      "resolver_cluster_concurrency": 2,
+      "max_active_events": 4,
+      "max_queued_events": 6,
+      "max_event_duration_ticks": 3,
+      "resolver_salvage_on_zero_accept": true,
+      "provider_preflight_check": true,
+      "provider_max_retries": 1,
+      "actor_on_failure": "defer",
+      "resolver_on_failure": "pause"
+    }
+  },
+  "resolver_smoke": {
+    "description": "Single-tick resolver sweep with the winning actor from actor smoke.",
+    "shared_max_rounds": 1,
+    "shared_repeat_count": 1,
+    "score_profile": "latency_smoke",
+    "shared_runtime_overrides": {
+      "intent_agents_per_tick": 4,
+      "intent_concurrency": 4,
+      "resolver_cluster_size": 2,
+      "resolver_cluster_concurrency": 2,
+      "max_active_events": 4,
+      "max_queued_events": 6,
+      "max_event_duration_ticks": 3,
+      "resolver_salvage_on_zero_accept": true,
+      "provider_preflight_check": true,
+      "provider_max_retries": 1,
+      "actor_on_failure": "defer",
+      "resolver_on_failure": "pause"
+    }
+  },
+  "progression": {
+    "description": "Three-tick finalist combo sweep for sustained world advancement.",
+    "shared_max_rounds": 3,
+    "shared_repeat_count": 1,
+    "score_profile": "progression_mini",
+    "top_actor_overall_count": 2,
+    "top_actor_metric_winners": [
+      "speed",
+      "cleanliness"
+    ],
+    "top_resolver_overall_count": 3,
+    "top_resolver_metric_winners": [
+      "progression",
+      "resilience"
+    ],
+    "combo_limit": 6,
+    "shared_runtime_overrides": {
+      "intent_agents_per_tick": 4,
+      "intent_concurrency": 4,
+      "resolver_cluster_size": 2,
+      "resolver_cluster_concurrency": 2,
+      "max_active_events": 4,
+      "max_queued_events": 6,
+      "max_event_duration_ticks": 2,
+      "resolver_salvage_on_zero_accept": true,
+      "provider_preflight_check": true,
+      "provider_max_retries": 1,
+      "actor_on_failure": "defer",
+      "resolver_on_failure": "pause"
+    }
+  },
+  "final_repeats": {
+    "description": "Repeat the strongest progression finalists three times for stability.",
+    "top_combo_count": 2,
+    "repeat_count": 3
+  },
+  "candidates": [
+    {
+      "candidate_id": "gpt54_fast",
+      "label": "GPT-5.4 Fast (litellm)",
+      "selector": "world_actor_fast",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "gpt",
+      "allow_health_only": true,
+      "notes": "Current fast GPT-5.4 profile via litellm."
+    },
+    {
+      "candidate_id": "gpt54_balanced",
+      "label": "GPT-5.4 Balanced (litellm)",
+      "selector": "default_primary",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "gpt",
+      "allow_health_only": true,
+      "notes": "Current balanced GPT-5.4 profile via litellm."
+    },
+    {
+      "candidate_id": "gpt54_deep",
+      "label": "GPT-5.4 Deep (litellm)",
+      "selector": "world_report_deep",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "gpt",
+      "allow_health_only": true,
+      "notes": "High-effort GPT-5.4 profile via litellm."
+    },
+    {
+      "candidate_id": "claude_opus_xiavier",
+      "label": "Claude Opus 4.6 (xiavier)",
+      "selector": "openclaw:xiavier/claude-opus-4-6",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "claude",
+      "allow_health_only": false,
+      "notes": "OpenAI-compatible Claude endpoint exposed by OpenClaw."
+    },
+    {
+      "candidate_id": "qwen35_plus_litellm",
+      "label": "Qwen 3.5 Plus (litellm)",
+      "selector": "openclaw:litellm/qwen3.5-plus",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "qwen",
+      "allow_health_only": false,
+      "notes": "litellm-routed Qwen 3.5 Plus."
+    },
+    {
+      "candidate_id": "qwen35_flash_litellm",
+      "label": "Qwen 3.5 Flash (litellm)",
+      "selector": "openclaw:litellm/qwen3.5-flash",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "qwen",
+      "allow_health_only": false,
+      "notes": "litellm-routed Qwen 3.5 Flash."
+    },
+    {
+      "candidate_id": "qwen35_plus_bailian",
+      "label": "Qwen 3.5 Plus (Aliyun Bailian)",
+      "selector": "openclaw:aliyun-bailian/qwen3.5-plus",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "qwen",
+      "allow_health_only": false,
+      "notes": "Aliyun Bailian endpoint for Qwen 3.5 Plus."
+    },
+    {
+      "candidate_id": "kimi_k25_bailian",
+      "label": "Kimi K2.5 (Aliyun Bailian)",
+      "selector": "openclaw:aliyun-bailian/kimi-k2.5",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "kimi",
+      "allow_health_only": false,
+      "notes": "Aliyun Bailian endpoint for Kimi K2.5."
+    },
+    {
+      "candidate_id": "minimax_m25_bailian",
+      "label": "MiniMax M2.5 (Aliyun Bailian)",
+      "selector": "openclaw:aliyun-bailian/MiniMax-M2.5",
+      "roles": [
+        "actor",
+        "resolver"
+      ],
+      "family": "minimax",
+      "allow_health_only": false,
+      "notes": "Aliyun Bailian endpoint for MiniMax M2.5."
+    }
+  ]
+}

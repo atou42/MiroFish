@@ -1,0 +1,164 @@
+{
+  "case_set_id": "campaign_20260319_pair_smoke_top9",
+  "case_set_label": "Campaign 20260319 Pair Smoke Top 9",
+  "name": "world-case-set-campaign-20260319-pair-smoke-top9",
+  "description": "Promoted long-term copy of the full pair smoke grid from the 2026-03-19 campaign using persistent selectors.",
+  "source_campaign_dir": "/Users/atou/MiroFish/backend/uploads/evals/world-model-campaign-20260319-122201",
+  "source_stage": "pair_smoke",
+  "selector_strategy": "Each campaign_* selector has been promoted to its persistent eval_* equivalent.",
+  "score_profile": "latency_smoke",
+  "shared_max_rounds": 1,
+  "shared_repeat_count": 1,
+  "shared_rewrite_agent_selectors": true,
+  "shared_runtime_overrides": {
+    "intent_agents_per_tick": 4,
+    "intent_concurrency": 4,
+    "resolver_cluster_size": 2,
+    "resolver_cluster_concurrency": 2,
+    "max_active_events": 4,
+    "max_queued_events": 6,
+    "max_event_duration_ticks": 3,
+    "resolver_salvage_on_zero_accept": true,
+    "provider_preflight_check": true,
+    "provider_max_retries": 1,
+    "actor_on_failure": "defer",
+    "resolver_on_failure": "pause"
+  },
+  "cases": [
+    {
+      "case_id": "pair-kimi-minimax",
+      "label": "Kimi K2.5 + MiniMax M2.5",
+      "actor_selector": "eval_aliyun_kimi_k25",
+      "resolver_selector": "eval_aliyun_minimax_m25",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign.",
+      "source_case_id": "pair-actor-aliyun-kimi-k25-resolver-aliyun-minimax-m25",
+      "source_metrics": {
+        "overall": 41.9,
+        "first_event_s": 195.92,
+        "simulation_total_s": 200.99,
+        "events_completed": 0.0,
+        "salvage_tick_rate": 0.0
+      }
+    },
+    {
+      "case_id": "pair-kimi-gpt54-deep",
+      "label": "Kimi K2.5 + GPT-5.4 deep",
+      "actor_selector": "eval_aliyun_kimi_k25",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign.",
+      "source_case_id": "pair-actor-aliyun-kimi-k25-resolver-litellm-gpt54-deep",
+      "source_metrics": {
+        "overall": 40.2,
+        "first_event_s": 214.69,
+        "simulation_total_s": 221.55,
+        "events_completed": 0.0,
+        "salvage_tick_rate": 0.0
+      }
+    },
+    {
+      "case_id": "pair-kimi-qwen35-plus",
+      "label": "Kimi K2.5 + Qwen 3.5 Plus",
+      "actor_selector": "eval_aliyun_kimi_k25",
+      "resolver_selector": "eval_aliyun_qwen35_plus",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign.",
+      "source_case_id": "pair-actor-aliyun-kimi-k25-resolver-aliyun-qwen35-plus",
+      "source_metrics": {
+        "overall": 53.9,
+        "first_event_s": 140.78,
+        "simulation_total_s": 147.14,
+        "events_completed": 1.0,
+        "salvage_tick_rate": 1.0
+      }
+    },
+    {
+      "case_id": "pair-qwen35-flash-minimax",
+      "label": "Qwen 3.5 Flash + MiniMax M2.5",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_minimax_m25",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign. Fast early, zero completed events.",
+      "source_case_id": "pair-actor-aliyun-qwen35-flash-resolver-aliyun-minimax-m25",
+      "source_metrics": {
+        "overall": 67.5,
+        "first_event_s": 116.4,
+        "simulation_total_s": 123.5,
+        "events_completed": 0.0,
+        "salvage_tick_rate": 0.0
+      }
+    },
+    {
+      "case_id": "pair-qwen35-flash-gpt54-deep",
+      "label": "Qwen 3.5 Flash + GPT-5.4 deep",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign.",
+      "source_case_id": "pair-actor-aliyun-qwen35-flash-resolver-litellm-gpt54-deep",
+      "source_metrics": {
+        "overall": 61.3,
+        "first_event_s": 183.78,
+        "simulation_total_s": 187.79,
+        "events_completed": 1.0,
+        "salvage_tick_rate": 0.0
+      }
+    },
+    {
+      "case_id": "pair-qwen35-flash-qwen35-plus",
+      "label": "Qwen 3.5 Flash + Qwen 3.5 Plus",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_qwen35_plus",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign. Strong but fully salvage-backed in smoke.",
+      "source_case_id": "pair-actor-aliyun-qwen35-flash-resolver-aliyun-qwen35-plus",
+      "source_metrics": {
+        "overall": 61.8,
+        "first_event_s": 123.85,
+        "simulation_total_s": 128.17,
+        "events_completed": 0.0,
+        "salvage_tick_rate": 1.0
+      }
+    },
+    {
+      "case_id": "pair-minimax-minimax",
+      "label": "MiniMax M2.5 + MiniMax M2.5",
+      "actor_selector": "eval_aliyun_minimax_m25",
+      "resolver_selector": "eval_aliyun_minimax_m25",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign.",
+      "source_case_id": "pair-actor-aliyun-minimax-m25-resolver-aliyun-minimax-m25",
+      "source_metrics": {
+        "overall": 53.7,
+        "first_event_s": 281.28,
+        "simulation_total_s": 285.68,
+        "events_completed": 1.0,
+        "salvage_tick_rate": 1.0
+      }
+    },
+    {
+      "case_id": "pair-minimax-gpt54-deep",
+      "label": "MiniMax M2.5 + GPT-5.4 deep",
+      "actor_selector": "eval_aliyun_minimax_m25",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign.",
+      "source_case_id": "pair-actor-aliyun-minimax-m25-resolver-litellm-gpt54-deep",
+      "source_metrics": {
+        "overall": 59.8,
+        "first_event_s": 176.83,
+        "simulation_total_s": 180.46,
+        "events_completed": 1.0,
+        "salvage_tick_rate": 1.0
+      }
+    },
+    {
+      "case_id": "pair-minimax-qwen35-plus",
+      "label": "MiniMax M2.5 + Qwen 3.5 Plus",
+      "actor_selector": "eval_aliyun_minimax_m25",
+      "resolver_selector": "eval_aliyun_qwen35_plus",
+      "notes": "Archived pair smoke case from the 2026-03-19 campaign.",
+      "source_case_id": "pair-actor-aliyun-minimax-m25-resolver-aliyun-qwen35-plus",
+      "source_metrics": {
+        "overall": 51.2,
+        "first_event_s": 136.09,
+        "simulation_total_s": 142.02,
+        "events_completed": 0.0,
+        "salvage_tick_rate": 1.0
+      }
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "default_primary": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "world_actor_fast": {
+      "openclaw_agent": "main",
+      "speed_mode": "fast"
+    },
+    "world_resolver_balanced": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "world_report_deep": {
+      "openclaw_agent": "main",
+      "speed_mode": "deep"
+    },
+    "ontology_balanced": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "report_agent_balanced": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "zep_tools_fast": {
+      "openclaw_agent": "main",
+      "speed_mode": "fast"
+    },
+    "simulation_config_balanced": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "oasis_profile_balanced": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "parallel_primary_balanced": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "parallel_secondary_fast": {
+      "openclaw_model": "codexvip/gpt-5.4",
+      "speed_mode": "fast"
+    },
+    "eval_aliyun_qwen35_flash": {
+      "openclaw_model": "aliyun-bailian/qwen3.5-flash"
+    },
+    "eval_aliyun_qwen35_plus": {
+      "openclaw_model": "aliyun-bailian/qwen3.5-plus"
+    },
+    "eval_aliyun_minimax_m25": {
+      "openclaw_model": "aliyun-bailian/MiniMax-M2.5"
+    },
+    "eval_litellm_gpt54_deep": {
+      "openclaw_model": "litellm/gpt-5.4",
+      "speed_mode": "deep"
+    },
+    "twitter_agent_balanced": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "reddit_agent_balanced": {
+      "openclaw_agent": "main",
+      "speed_mode": "balanced"
+    },
+    "custom_openai_example": {
+      "provider": "custom_openai",
+      "model_name": "gpt-5.4",
+      "speed_mode": "balanced"
+    }
+  },
+  "providers": {
+    "custom_openai": {
+      "api_key_env": "CUSTOM_OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1"
+    }
+  },
+  "routes": {
+    "default": "default_primary",
+    "world_agent": "world_actor_fast",
+    "world_resolver": "world_resolver_balanced",
+    "world_profile": "world_actor_fast",
+    "world_config": "world_resolver_balanced",
+    "world_report": "world_report_deep",
+    "ontology": "ontology_balanced",
+    "report_agent": "report_agent_balanced",
+    "zep_tools": "zep_tools_fast",
+    "simulation_config": "simulation_config_balanced",
+    "oasis_profile": "oasis_profile_balanced",
+    "parallel_primary": "parallel_primary_balanced",
+    "parallel_secondary": "parallel_secondary_fast",
+    "twitter_agent": "twitter_agent_balanced",
+    "reddit_agent": "reddit_agent_balanced"
+  },
+  "agent_selectors": {
+    "world": {
+      "default": "world_actor_fast",
+      "by_entity_type": {
+        "faction": "world_actor_fast",
+        "character": "world_actor_fast",
+        "organization": "world_actor_fast"
+      }
+    }
+  }
+}

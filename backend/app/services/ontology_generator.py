@@ -6,10 +6,11 @@
 import json
 from typing import Dict, Any, List, Optional
 from ..utils.llm_client import LLMClient
+from ..models.simulation_mode import SimulationMode
 
 
 # 本体生成的系统提示词
-ONTOLOGY_SYSTEM_PROMPT = """你是一个专业的知识图谱本体设计专家。你的任务是分析给定的文本内容和模拟需求，设计适合**社交媒体舆论模拟**的实体类型和关系类型。
+SOCIAL_ONTOLOGY_SYSTEM_PROMPT = """你是一个专业的知识图谱本体设计专家。你的任务是分析给定的文本内容和模拟需求，设计适合**社交媒体舆论模拟**的实体类型和关系类型。
 
 **重要：你必须输出有效的JSON格式数据，不要输出任何其他内容。**
 
@@ -154,6 +155,93 @@ B. **具体类型（8个，根据文本内容设计）**：
 - COMPETES_WITH: 竞争
 """
 
+WORLD_ONTOLOGY_SYSTEM_PROMPT = """你是一个专业的知识图谱本体设计专家。你的任务是分析给定的文本内容和模拟需求，设计适合**世界观演化 / 剧情推进模拟**的实体类型和关系类型。
+
+**重要：你必须输出有效的JSON格式数据，不要输出任何其他内容。**
+
+## 核心任务背景
+
+我们正在构建一个“给定世界观，自动推进世界”的模拟系统。这个系统中的实体不再局限于社交媒体发声主体，而是整个世界运行所需的关键要素：
+- 角色 / 群体 / 势力
+- 地点 / 领地 / 城市 / 区域
+- 资源 / 技术 / 道具 / 神器
+- 规则 / 禁忌 / 法术 / 制度
+- 事件 / 危机 / 阴谋 / 线索
+
+因此，实体类型需要服务于“世界状态如何变化、谁在推动变化、变化波及哪些对象”。
+
+## 输出格式
+
+请输出JSON格式，包含以下结构：
+
+```json
+{
+    "entity_types": [
+        {
+            "name": "实体类型名称（英文，PascalCase）",
+            "description": "简短描述（英文，不超过100字符）",
+            "attributes": [
+                {
+                    "name": "属性名（英文，snake_case）",
+                    "type": "text",
+                    "description": "属性描述"
+                }
+            ],
+            "examples": ["示例实体1", "示例实体2"]
+        }
+    ],
+    "edge_types": [
+        {
+            "name": "关系类型名称（英文，UPPER_SNAKE_CASE）",
+            "description": "简短描述（英文，不超过100字符）",
+            "source_targets": [
+                {"source": "源实体类型", "target": "目标实体类型"}
+            ],
+            "attributes": []
+        }
+    ],
+    "analysis_summary": "对世界观与推进空间的简要分析（中文）"
+}
+```
+
+## 设计指南
+
+### 1. 实体类型设计
+
+- 数量：8-10 个
+- 必须覆盖以下至少 4 类中的 3 类：
+  - 行动主体：Character / Faction / Organization / Creature / Person
+  - 场所与版图：Place / Region / City / Realm
+  - 世界机制：Rule / Technology / MagicSystem / Institution
+  - 推进媒介：Artifact / Resource / Secret / Event / Threat
+- 实体可以不是“会说话的人”，但必须是剧情推进中的关键承载者
+- 避免抽象到无法落图，例如“命运”“悬念”“希望”
+
+### 2. 关系类型设计
+
+- 数量：6-10 个
+- 关系需要支持世界演化，例如：
+  - RULES_OVER, ALLIED_WITH, HOSTILE_TO, LOCATED_IN
+  - SEEKS, POSSESSES, THREATENS, RESTRICTS, TRIGGERS
+- 关系应尽量能表达因果、约束、归属、争夺或移动
+
+### 3. 属性设计
+
+- 每个实体类型 1-3 个关键属性
+- 属性名不能使用 `name`、`uuid`、`group_id`、`created_at`、`summary`
+- 优先使用能帮助模拟推进的属性，例如 `goal`, `status`, `territory`, `resource_level`, `belief`, `capability`
+
+## 世界观本体示例方向
+
+- Character: 关键角色或叙事视角人物
+- Faction: 有共同目标和资源的组织化群体
+- Place: 能承载事件发生与控制关系的地点
+- Artifact: 能改变力量平衡的关键物件
+- Rule: 约束行为和结果的世界规则
+- Threat: 迫近的危机、灾变或冲突源
+- Secret: 影响剧情走向的隐性信息
+"""
+
 
 class OntologyGenerator:
     """
@@ -162,13 +250,14 @@ class OntologyGenerator:
     """
     
     def __init__(self, llm_client: Optional[LLMClient] = None):
-        self.llm_client = llm_client or LLMClient()
+        self.llm_client = llm_client or LLMClient.from_namespace("ONTOLOGY")
     
     def generate(
         self,
         document_texts: List[str],
         simulation_requirement: str,
-        additional_context: Optional[str] = None
+        additional_context: Optional[str] = None,
+        simulation_mode: str = SimulationMode.SOCIAL.value,
     ) -> Dict[str, Any]:
         """
         生成本体定义
@@ -185,11 +274,16 @@ class OntologyGenerator:
         user_message = self._build_user_message(
             document_texts, 
             simulation_requirement,
-            additional_context
+            additional_context,
+            simulation_mode,
         )
+        mode = SimulationMode.normalize(simulation_mode)
         
         messages = [
-            {"role": "system", "content": ONTOLOGY_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": WORLD_ONTOLOGY_SYSTEM_PROMPT if mode == SimulationMode.WORLD else SOCIAL_ONTOLOGY_SYSTEM_PROMPT,
+            },
             {"role": "user", "content": user_message}
         ]
         
@@ -201,7 +295,7 @@ class OntologyGenerator:
         )
         
         # 验证和后处理
-        result = self._validate_and_process(result)
+        result = self._validate_and_process(result, mode)
         
         return result
     
@@ -212,7 +306,8 @@ class OntologyGenerator:
         self,
         document_texts: List[str],
         simulation_requirement: str,
-        additional_context: Optional[str]
+        additional_context: Optional[str],
+        simulation_mode: str,
     ) -> str:
         """构建用户消息"""
         
@@ -241,7 +336,20 @@ class OntologyGenerator:
 {additional_context}
 """
         
-        message += """
+        mode = SimulationMode.normalize(simulation_mode)
+        if mode == SimulationMode.WORLD:
+            message += """
+请根据以上内容，设计适合世界观推进模拟的实体类型和关系类型。
+
+**必须遵守的规则**：
+1. 输出 8-10 个实体类型，优先覆盖行动主体、地点、机制、推进媒介中的至少三类
+2. 实体不必都是“会发言的账号”，但都必须能承载世界状态变化
+3. 关系类型要支持冲突、联盟、支配、移动、约束、触发等演化逻辑
+4. 属性名不能使用 name、uuid、group_id 等保留字
+5. analysis_summary 需要说明这个世界观最关键的推进矛盾和不稳定因素
+"""
+        else:
+            message += """
 请根据以上内容，设计适合社会舆论模拟的实体类型和关系类型。
 
 **必须遵守的规则**：
@@ -254,7 +362,11 @@ class OntologyGenerator:
         
         return message
     
-    def _validate_and_process(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _validate_and_process(
+        self,
+        result: Dict[str, Any],
+        simulation_mode: SimulationMode = SimulationMode.SOCIAL,
+    ) -> Dict[str, Any]:
         """验证和后处理结果"""
         
         # 确保必要字段存在
@@ -287,53 +399,80 @@ class OntologyGenerator:
         # Zep API 限制：最多 10 个自定义实体类型，最多 10 个自定义边类型
         MAX_ENTITY_TYPES = 10
         MAX_EDGE_TYPES = 10
-        
-        # 兜底类型定义
-        person_fallback = {
-            "name": "Person",
-            "description": "Any individual person not fitting other specific person types.",
-            "attributes": [
-                {"name": "full_name", "type": "text", "description": "Full name of the person"},
-                {"name": "role", "type": "text", "description": "Role or occupation"}
-            ],
-            "examples": ["ordinary citizen", "anonymous netizen"]
-        }
-        
-        organization_fallback = {
-            "name": "Organization",
-            "description": "Any organization not fitting other specific organization types.",
-            "attributes": [
-                {"name": "org_name", "type": "text", "description": "Name of the organization"},
-                {"name": "org_type", "type": "text", "description": "Type of organization"}
-            ],
-            "examples": ["small business", "community group"]
-        }
-        
-        # 检查是否已有兜底类型
-        entity_names = {e["name"] for e in result["entity_types"]}
-        has_person = "Person" in entity_names
-        has_organization = "Organization" in entity_names
-        
-        # 需要添加的兜底类型
-        fallbacks_to_add = []
-        if not has_person:
-            fallbacks_to_add.append(person_fallback)
-        if not has_organization:
-            fallbacks_to_add.append(organization_fallback)
-        
-        if fallbacks_to_add:
-            current_count = len(result["entity_types"])
-            needed_slots = len(fallbacks_to_add)
-            
-            # 如果添加后会超过 10 个，需要移除一些现有类型
-            if current_count + needed_slots > MAX_ENTITY_TYPES:
-                # 计算需要移除多少个
-                to_remove = current_count + needed_slots - MAX_ENTITY_TYPES
-                # 从末尾移除（保留前面更重要的具体类型）
-                result["entity_types"] = result["entity_types"][:-to_remove]
-            
-            # 添加兜底类型
-            result["entity_types"].extend(fallbacks_to_add)
+
+        if simulation_mode == SimulationMode.SOCIAL:
+            person_fallback = {
+                "name": "Person",
+                "description": "Any individual person not fitting other specific person types.",
+                "attributes": [
+                    {"name": "full_name", "type": "text", "description": "Full name of the person"},
+                    {"name": "role", "type": "text", "description": "Role or occupation"}
+                ],
+                "examples": ["ordinary citizen", "anonymous netizen"]
+            }
+
+            organization_fallback = {
+                "name": "Organization",
+                "description": "Any organization not fitting other specific organization types.",
+                "attributes": [
+                    {"name": "org_name", "type": "text", "description": "Name of the organization"},
+                    {"name": "org_type", "type": "text", "description": "Type of organization"}
+                ],
+                "examples": ["small business", "community group"]
+            }
+
+            entity_names = {e["name"] for e in result["entity_types"]}
+            has_person = "Person" in entity_names
+            has_organization = "Organization" in entity_names
+
+            fallbacks_to_add = []
+            if not has_person:
+                fallbacks_to_add.append(person_fallback)
+            if not has_organization:
+                fallbacks_to_add.append(organization_fallback)
+
+            if fallbacks_to_add:
+                current_count = len(result["entity_types"])
+                needed_slots = len(fallbacks_to_add)
+                if current_count + needed_slots > MAX_ENTITY_TYPES:
+                    to_remove = current_count + needed_slots - MAX_ENTITY_TYPES
+                    result["entity_types"] = result["entity_types"][:-to_remove]
+                result["entity_types"].extend(fallbacks_to_add)
+        else:
+            actor_fallback = {
+                "name": "Actor",
+                "description": "Fallback type for any world actor with agency.",
+                "attributes": [
+                    {"name": "role_hint", "type": "text", "description": "What this actor tends to do"},
+                    {"name": "current_status", "type": "text", "description": "Current condition or stance"}
+                ],
+                "examples": ["wandering knight", "local magistrate"]
+            }
+
+            world_element_fallback = {
+                "name": "WorldElement",
+                "description": "Fallback type for any important non-actor world element.",
+                "attributes": [
+                    {"name": "world_function", "type": "text", "description": "Why this element matters"},
+                    {"name": "state_marker", "type": "text", "description": "Current state or integrity"}
+                ],
+                "examples": ["sealed gate", "cursed relic"]
+            }
+
+            entity_names = {e["name"] for e in result["entity_types"]}
+            fallbacks_to_add = []
+            if "Actor" not in entity_names:
+                fallbacks_to_add.append(actor_fallback)
+            if "WorldElement" not in entity_names:
+                fallbacks_to_add.append(world_element_fallback)
+
+            if fallbacks_to_add:
+                current_count = len(result["entity_types"])
+                needed_slots = len(fallbacks_to_add)
+                if current_count + needed_slots > MAX_ENTITY_TYPES:
+                    to_remove = current_count + needed_slots - MAX_ENTITY_TYPES
+                    result["entity_types"] = result["entity_types"][:-to_remove]
+                result["entity_types"].extend(fallbacks_to_add)
         
         # 最终确保不超过限制（防御性编程）
         if len(result["entity_types"]) > MAX_ENTITY_TYPES:
@@ -450,4 +589,3 @@ class OntologyGenerator:
         code_lines.append('}')
         
         return '\n'.join(code_lines)
-

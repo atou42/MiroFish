@@ -1,0 +1,59 @@
+{
+  "name": "world-model-progression-mini",
+  "description": "Three-tick mini benchmark for sustained world advancement, queue flow, and realized state movement.",
+  "score_profile": "progression_mini",
+  "shared_max_rounds": 3,
+  "shared_repeat_count": 1,
+  "shared_rewrite_agent_selectors": true,
+  "shared_runtime_overrides": {
+    "intent_agents_per_tick": 4,
+    "intent_concurrency": 4,
+    "resolver_cluster_size": 2,
+    "resolver_cluster_concurrency": 2,
+    "max_active_events": 4,
+    "max_queued_events": 6,
+    "max_event_duration_ticks": 2,
+    "resolver_salvage_on_zero_accept": true,
+    "provider_preflight_check": true,
+    "provider_max_retries": 1,
+    "actor_on_failure": "defer",
+    "resolver_on_failure": "pause"
+  },
+  "cases": [
+    {
+      "case_id": "baseline-fast-balanced",
+      "label": "Baseline GPT-5.4 fast actor / balanced resolver",
+      "actor_selector": "world_actor_fast",
+      "resolver_selector": "world_resolver_balanced",
+      "notes": "Current world runtime baseline."
+    },
+    {
+      "case_id": "balanced-balanced",
+      "label": "GPT-5.4 balanced actor / balanced resolver",
+      "actor_selector": "default_primary",
+      "resolver_selector": "default_primary",
+      "notes": "Measures whether actor low-effort is the main speed bottleneck."
+    },
+    {
+      "case_id": "fast-deep",
+      "label": "GPT-5.4 fast actor / deep resolver",
+      "actor_selector": "world_actor_fast",
+      "resolver_selector": "world_report_deep",
+      "notes": "Measures whether deeper resolver reasoning buys cleaner event resolution."
+    },
+    {
+      "case_id": "deep-balanced",
+      "label": "GPT-5.4 deep actor / balanced resolver",
+      "actor_selector": "world_report_deep",
+      "resolver_selector": "world_resolver_balanced",
+      "notes": "Measures whether slower/deeper actor generation improves intent quality enough to justify cost."
+    },
+    {
+      "case_id": "alt-fast-fast",
+      "label": "Alternate fast profile / alternate fast profile",
+      "actor_selector": "parallel_secondary_fast",
+      "resolver_selector": "parallel_secondary_fast",
+      "notes": "Tests the alternate configured provider/model path if available."
+    }
+  ]
+}

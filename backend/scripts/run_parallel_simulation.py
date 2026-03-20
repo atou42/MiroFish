@@ -102,6 +102,8 @@ else:
         load_dotenv(_backend_env)
         print(f"已加载环境配置: {_backend_env}")
 
+from app.config import Config
+
 
 class MaxTokensWarningFilter(logging.Filter):
     """过滤掉 camel-ai 关于 max_tokens 的警告（我们故意不设置 max_tokens，让模型自行决定）"""
@@ -995,26 +997,35 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
         config: 模拟配置字典
         use_boost: 是否使用加速 LLM 配置（如果可用）
     """
-    # 检查是否有加速配置
-    boost_api_key = os.environ.get("LLM_BOOST_API_KEY", "")
-    boost_base_url = os.environ.get("LLM_BOOST_BASE_URL", "")
-    boost_model = os.environ.get("LLM_BOOST_MODEL_NAME", "")
-    has_boost_config = bool(boost_api_key)
-    
-    # 根据参数和配置情况选择使用哪个 LLM
-    if use_boost and has_boost_config:
-        # 使用加速配置
-        llm_api_key = boost_api_key
-        llm_base_url = boost_base_url
-        llm_model = boost_model or os.environ.get("LLM_MODEL_NAME", "")
-        config_label = "[加速LLM]"
+    route_name = "PARALLEL_SECONDARY" if use_boost else "PARALLEL_PRIMARY"
+    resolved = Config.get_llm_config(route_name)
+
+    if resolved.get("source") == "registry":
+        llm_api_key = resolved.get("api_key") or ""
+        llm_base_url = resolved.get("base_url") or ""
+        llm_model = resolved.get("model_name") or config.get("llm_model", "gpt-4o-mini")
+        config_label = f"[{route_name.lower()}]"
     else:
-        # 使用通用配置
-        llm_api_key = os.environ.get("LLM_API_KEY", "")
-        llm_base_url = os.environ.get("LLM_BASE_URL", "")
-        llm_model = os.environ.get("LLM_MODEL_NAME", "")
-        config_label = "[通用LLM]"
-    
+        # 检查是否有 legacy 加速配置
+        boost_api_key = os.environ.get("LLM_BOOST_API_KEY", "")
+        boost_base_url = os.environ.get("LLM_BOOST_BASE_URL", "")
+        boost_model = os.environ.get("LLM_BOOST_MODEL_NAME", "")
+        has_boost_config = bool(boost_api_key)
+
+        # 根据参数和配置情况选择使用哪个 LLM
+        if use_boost and has_boost_config:
+            # 使用加速配置
+            llm_api_key = boost_api_key
+            llm_base_url = boost_base_url
+            llm_model = boost_model or os.environ.get("LLM_MODEL_NAME", "")
+            config_label = "[加速LLM]"
+        else:
+            # 使用通用配置
+            llm_api_key = os.environ.get("LLM_API_KEY", "")
+            llm_base_url = os.environ.get("LLM_BASE_URL", "")
+            llm_model = os.environ.get("LLM_MODEL_NAME", "")
+            config_label = "[通用LLM]"
+
     # 如果 .env 中没有模型名，则使用 config 作为备用
     if not llm_model:
         llm_model = config.get("llm_model", "gpt-4o-mini")
@@ -1024,7 +1035,7 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
         os.environ["OPENAI_API_KEY"] = llm_api_key
     
     if not os.environ.get("OPENAI_API_KEY"):
-        raise ValueError("缺少 API Key 配置，请在项目根目录 .env 文件中设置 LLM_API_KEY")
+        raise ValueError("缺少 API Key 配置，请检查 llm_registry.json 或 .env")
     
     if llm_base_url:
         os.environ["OPENAI_API_BASE_URL"] = llm_base_url

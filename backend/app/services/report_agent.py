@@ -21,6 +21,7 @@ from enum import Enum
 from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
+from ..models.simulation_mode import SimulationMode
 from .zep_tools import (
     ZepToolsService, 
     SearchResult, 
@@ -445,6 +446,7 @@ class Report:
     graph_id: str
     simulation_requirement: str
     status: ReportStatus
+    simulation_mode: str = SimulationMode.SOCIAL.value
     outline: Optional[ReportOutline] = None
     markdown_content: str = ""
     created_at: str = ""
@@ -457,6 +459,7 @@ class Report:
             "simulation_id": self.simulation_id,
             "graph_id": self.graph_id,
             "simulation_requirement": self.simulation_requirement,
+            "simulation_mode": self.simulation_mode,
             "status": self.status.value,
             "outline": self.outline.to_dict() if self.outline else None,
             "markdown_content": self.markdown_content,
@@ -855,6 +858,82 @@ CHAT_SYSTEM_PROMPT_TEMPLATE = """\
 
 CHAT_OBSERVATION_SUFFIX = "\n\n请简洁回答问题。"
 
+WORLD_PLAN_SYSTEM_PROMPT = """\
+你是一个“世界推进分析师”。你观察到的不是舆情平台，而是一个会自行演化的故事世界。
+
+你的任务是规划一份报告，回答：
+1. 在给定世界设定和推进条件下，局势如何演化？
+2. 哪些角色、势力、地点、规则或资源在驱动变化？
+3. 哪些风险、拐点与后续悬念最值得继续追踪？
+
+请输出 JSON 格式报告大纲，章节数量 2-5 个，聚焦世界状态变化与推进动力。"""
+
+WORLD_PLAN_USER_PROMPT_TEMPLATE = """\
+【世界推进条件】
+{simulation_requirement}
+
+【世界规模】
+- 图谱节点数: {total_nodes}
+- 图谱边数: {total_edges}
+- 实体类型分布: {entity_types}
+- 关键参与体数量: {total_entities}
+
+【模拟中已经观察到的关键事实样本】
+{related_facts_json}
+
+【世界运行时摘要】
+{world_runtime_summary}
+
+请从世界状态推进的视角设计报告大纲，重点覆盖：
+- 势力与角色如何博弈
+- 世界规则 / 资源 / 地点如何改变结果
+- 下一阶段最可能出现的转折点
+"""
+
+WORLD_SECTION_SYSTEM_PROMPT_TEMPLATE = """\
+你是一个“世界推进分析师”，正在撰写世界模拟报告的一个章节。
+
+报告标题: {report_title}
+报告摘要: {report_summary}
+推进条件: {simulation_requirement}
+当前章节: {section_title}
+运行时摘要:
+{world_runtime_summary}
+
+核心要求：
+1. 必须调用工具观察模拟世界，不能脱离现有图谱和日志自行编造。
+2. 内容要描述世界状态如何变化，而不是写成社交平台舆情综述。
+3. 重点关注角色、势力、地点、资源、规则、事件之间的相互作用。
+4. 每章节至少调用 2 次工具，最多 5 次。
+5. 不要添加 Markdown 标题，直接输出正文；可用 **粗体** 组织结构。
+
+可用工具：
+{tools_description}
+
+当信息充分时，以 "Final Answer:" 开头输出章节正文。"""
+
+WORLD_CHAT_SYSTEM_PROMPT_TEMPLATE = """\
+你是一个简洁的世界推进助手。
+
+【世界推进条件】
+{simulation_requirement}
+
+【已有报告】
+{report_content}
+
+【世界运行时摘要】
+{world_runtime_summary}
+
+【规则】
+1. 先基于已有报告作答。
+2. 只有在报告不足时才调用工具。
+3. 回答聚焦“局势如何推进、谁在推动、下个拐点是什么”。
+4. 若 world 模式不支持实时采访，不要承诺去采访角色。
+
+【可用工具】
+{tools_description}
+"""
+
 
 # ═══════════════════════════════════════════════════════════════
 # ReportAgent 主类
@@ -885,6 +964,7 @@ class ReportAgent:
         graph_id: str,
         simulation_id: str,
         simulation_requirement: str,
+        simulation_mode: str = SimulationMode.SOCIAL.value,
         llm_client: Optional[LLMClient] = None,
         zep_tools: Optional[ZepToolsService] = None
     ):
@@ -901,9 +981,18 @@ class ReportAgent:
         self.graph_id = graph_id
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
+        self.simulation_mode = SimulationMode.normalize(simulation_mode).value
         
-        self.llm = llm_client or LLMClient()
-        self.zep_tools = zep_tools or ZepToolsService()
+        if llm_client is not None:
+            self.llm = llm_client
+        else:
+            route_name = "WORLD_REPORT" if self.simulation_mode == SimulationMode.WORLD.value else "REPORT_AGENT"
+            self.llm = LLMClient.from_namespace(route_name)
+
+        if zep_tools is not None:
+            self.zep_tools = zep_tools
+        else:
+            self.zep_tools = ZepToolsService(llm_client=LLMClient.from_namespace("ZEP_TOOLS"))
         
         # 工具定义
         self.tools = self._define_tools()
@@ -914,10 +1003,124 @@ class ReportAgent:
         self.console_logger: Optional[ReportConsoleLogger] = None
         
         logger.info(f"ReportAgent 初始化完成: graph_id={graph_id}, simulation_id={simulation_id}")
+
+    def _load_world_runtime_context(self) -> Dict[str, Any]:
+        """读取 world 模式运行时快照与生命周期摘要，供 report/chat 使用。"""
+        sim_dir = os.path.join(Config.UPLOAD_FOLDER, "simulations", self.simulation_id, "world")
+        world_state_path = os.path.join(sim_dir, "world_state.json")
+        snapshots_path = os.path.join(sim_dir, "state_snapshots.jsonl")
+        actions_path = os.path.join(sim_dir, "actions.jsonl")
+
+        latest_snapshot: Dict[str, Any] = {}
+        if os.path.exists(world_state_path):
+            try:
+                with open(world_state_path, "r", encoding="utf-8") as f:
+                    latest_snapshot = json.load(f)
+            except Exception as e:
+                logger.warning(f"读取 world_state.json 失败: {e}")
+
+        recent_snapshots: List[Dict[str, Any]] = []
+        if os.path.exists(snapshots_path):
+            try:
+                with open(snapshots_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            snapshot = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        recent_snapshots.append(snapshot)
+            except Exception as e:
+                logger.warning(f"读取 world snapshots 失败: {e}")
+
+        recent_events: List[Dict[str, Any]] = []
+        if os.path.exists(actions_path):
+            try:
+                with open(actions_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        normalized = self._normalize_world_runtime_payload(payload)
+                        if normalized:
+                            recent_events.append(normalized)
+            except Exception as e:
+                logger.warning(f"读取 world actions 失败: {e}")
+
+        if not latest_snapshot and recent_snapshots:
+            latest_snapshot = recent_snapshots[-1]
+
+        return {
+            "latest_snapshot": latest_snapshot,
+            "recent_tick_summaries": [
+                {
+                    "tick": item.get("tick") or item.get("round"),
+                    "summary": item.get("summary"),
+                    "metrics": item.get("metrics", {}),
+                }
+                for item in recent_snapshots[-6:]
+            ],
+            "recent_events": recent_events[-18:],
+        }
+
+    def _normalize_world_runtime_payload(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if payload.get("event_type"):
+            return {
+                "event_type": str(payload.get("event_type") or "").strip().lower(),
+                "tick": payload.get("tick") or payload.get("round"),
+                "summary": payload.get("summary"),
+                "phase": payload.get("phase"),
+                "active_events_count": payload.get("active_events_count"),
+                "queued_events_count": payload.get("queued_events_count"),
+                "timestamp": payload.get("timestamp"),
+            }
+
+        action_type = str(payload.get("action_type") or "").strip().lower()
+        if not action_type:
+            return None
+
+        action_args = payload.get("action_args") or {}
+        embedded_event = action_args.get("event") if isinstance(action_args.get("event"), dict) else {}
+        event_payload = embedded_event if embedded_event else action_args
+        return {
+            "event_type": action_type,
+            "tick": payload.get("round") or event_payload.get("tick"),
+            "timestamp": payload.get("timestamp"),
+            "agent_name": payload.get("agent_name"),
+            "summary": event_payload.get("summary") or action_args.get("summary") or payload.get("result"),
+            "resolution_status": action_args.get("resolution_status"),
+            "event_id": event_payload.get("event_id"),
+            "title": event_payload.get("title"),
+            "participants": event_payload.get("participants") or action_args.get("participants") or [],
+            "location": event_payload.get("location") or action_args.get("location"),
+            "target": event_payload.get("target") or action_args.get("target"),
+            "status": event_payload.get("status"),
+        }
+
+    def _format_world_runtime_summary(self) -> str:
+        context = self._load_world_runtime_context()
+        latest_snapshot = context.get("latest_snapshot") or {}
+        compact = {
+            "latest_snapshot_summary": latest_snapshot.get("summary"),
+            "world_state": latest_snapshot.get("world_state", {}),
+            "active_events": (latest_snapshot.get("active_events") or [])[:6],
+            "queued_events": (latest_snapshot.get("queued_events") or [])[:6],
+            "recent_completed_events": (latest_snapshot.get("recent_completed_events") or [])[:6],
+            "recent_tick_summaries": context.get("recent_tick_summaries", [])[-4:],
+            "recent_events": context.get("recent_events", [])[-10:],
+        }
+        text = json.dumps(compact, ensure_ascii=False, indent=2)
+        return text[:5000]
     
     def _define_tools(self) -> Dict[str, Dict[str, Any]]:
         """定义可用工具"""
-        return {
+        tools = {
             "insight_forge": {
                 "name": "insight_forge",
                 "description": TOOL_DESC_INSIGHT_FORGE,
@@ -941,8 +1144,10 @@ class ReportAgent:
                     "query": "搜索查询字符串",
                     "limit": "返回结果数量（可选，默认10）"
                 }
-            },
-            "interview_agents": {
+            }
+        }
+        if self.simulation_mode != SimulationMode.WORLD.value:
+            tools["interview_agents"] = {
                 "name": "interview_agents",
                 "description": TOOL_DESC_INTERVIEW_AGENTS,
                 "parameters": {
@@ -950,7 +1155,7 @@ class ReportAgent:
                     "max_agents": "最多采访的Agent数量（可选，默认5，最大10）"
                 }
             }
-        }
+        return tools
     
     def _execute_tool(self, tool_name: str, parameters: Dict[str, Any], report_context: str = "") -> str:
         """
@@ -1005,6 +1210,8 @@ class ReportAgent:
                 return result.to_text()
             
             elif tool_name == "interview_agents":
+                if self.simulation_mode == SimulationMode.WORLD.value:
+                    return "world 模式暂不支持实时角色采访，请改用图谱检索与日志分析。"
                 # 深度采访 - 调用真实的OASIS采访API获取模拟Agent的回答（双平台）
                 interview_topic = parameters.get("interview_topic", parameters.get("query", ""))
                 max_agents = parameters.get("max_agents", 5)
@@ -1060,8 +1267,8 @@ class ReportAgent:
             logger.error(f"工具执行失败: {tool_name}, 错误: {str(e)}")
             return f"工具执行失败: {str(e)}"
     
-    # 合法的工具名称集合，用于裸 JSON 兜底解析时校验
-    VALID_TOOL_NAMES = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+    def _valid_tool_names(self) -> set:
+        return set(self.tools.keys())
 
     def _parse_tool_calls(self, response: str) -> List[Dict[str, Any]]:
         """
@@ -1114,7 +1321,7 @@ class ReportAgent:
         """校验解析出的 JSON 是否是合法的工具调用"""
         # 支持 {"name": ..., "parameters": ...} 和 {"tool": ..., "params": ...} 两种键名
         tool_name = data.get("name") or data.get("tool")
-        if tool_name and tool_name in self.VALID_TOOL_NAMES:
+        if tool_name and tool_name in self._valid_tool_names():
             # 统一键名为 name / parameters
             if "tool" in data:
                 data["name"] = data.pop("tool")
@@ -1162,15 +1369,28 @@ class ReportAgent:
         if progress_callback:
             progress_callback("planning", 30, "正在生成报告大纲...")
         
-        system_prompt = PLAN_SYSTEM_PROMPT
-        user_prompt = PLAN_USER_PROMPT_TEMPLATE.format(
-            simulation_requirement=self.simulation_requirement,
-            total_nodes=context.get('graph_statistics', {}).get('total_nodes', 0),
-            total_edges=context.get('graph_statistics', {}).get('total_edges', 0),
-            entity_types=list(context.get('graph_statistics', {}).get('entity_types', {}).keys()),
-            total_entities=context.get('total_entities', 0),
-            related_facts_json=json.dumps(context.get('related_facts', [])[:10], ensure_ascii=False, indent=2),
-        )
+        if self.simulation_mode == SimulationMode.WORLD.value:
+            world_runtime_summary = self._format_world_runtime_summary()
+            system_prompt = WORLD_PLAN_SYSTEM_PROMPT
+            user_prompt = WORLD_PLAN_USER_PROMPT_TEMPLATE.format(
+                simulation_requirement=self.simulation_requirement,
+                total_nodes=context.get('graph_statistics', {}).get('total_nodes', 0),
+                total_edges=context.get('graph_statistics', {}).get('total_edges', 0),
+                entity_types=list(context.get('graph_statistics', {}).get('entity_types', {}).keys()),
+                total_entities=context.get('total_entities', 0),
+                related_facts_json=json.dumps(context.get('related_facts', [])[:10], ensure_ascii=False, indent=2),
+                world_runtime_summary=world_runtime_summary,
+            )
+        else:
+            system_prompt = PLAN_SYSTEM_PROMPT
+            user_prompt = PLAN_USER_PROMPT_TEMPLATE.format(
+                simulation_requirement=self.simulation_requirement,
+                total_nodes=context.get('graph_statistics', {}).get('total_nodes', 0),
+                total_edges=context.get('graph_statistics', {}).get('total_edges', 0),
+                entity_types=list(context.get('graph_statistics', {}).get('entity_types', {}).keys()),
+                total_entities=context.get('total_entities', 0),
+                related_facts_json=json.dumps(context.get('related_facts', [])[:10], ensure_ascii=False, indent=2),
+            )
 
         try:
             response = self.llm.chat_json(
@@ -1193,7 +1413,10 @@ class ReportAgent:
                 ))
             
             outline = ReportOutline(
-                title=response.get("title", "模拟分析报告"),
+                title=response.get(
+                    "title",
+                    "世界推进报告" if self.simulation_mode == SimulationMode.WORLD.value else "模拟分析报告"
+                ),
                 summary=response.get("summary", ""),
                 sections=sections
             )
@@ -1207,14 +1430,23 @@ class ReportAgent:
         except Exception as e:
             logger.error(f"大纲规划失败: {str(e)}")
             # 返回默认大纲（3个章节，作为fallback）
-            return ReportOutline(
-                title="未来预测报告",
-                summary="基于模拟预测的未来趋势与风险分析",
-                sections=[
+            fallback_sections = (
+                [
+                    ReportSection(title="世界状态与核心发现"),
+                    ReportSection(title="角色与势力推进分析"),
+                    ReportSection(title="下一阶段拐点与风险"),
+                ]
+                if self.simulation_mode == SimulationMode.WORLD.value
+                else [
                     ReportSection(title="预测场景与核心发现"),
                     ReportSection(title="人群行为预测分析"),
-                    ReportSection(title="趋势展望与风险提示")
+                    ReportSection(title="趋势展望与风险提示"),
                 ]
+            )
+            return ReportOutline(
+                title="世界推进报告" if self.simulation_mode == SimulationMode.WORLD.value else "未来预测报告",
+                summary="基于模拟预测的世界状态推进分析" if self.simulation_mode == SimulationMode.WORLD.value else "基于模拟预测的未来趋势与风险分析",
+                sections=fallback_sections
             )
     
     def _generate_section_react(
@@ -1251,13 +1483,24 @@ class ReportAgent:
         if self.report_logger:
             self.report_logger.log_section_start(section.title, section_index)
         
-        system_prompt = SECTION_SYSTEM_PROMPT_TEMPLATE.format(
-            report_title=outline.title,
-            report_summary=outline.summary,
-            simulation_requirement=self.simulation_requirement,
-            section_title=section.title,
-            tools_description=self._get_tools_description(),
-        )
+        if self.simulation_mode == SimulationMode.WORLD.value:
+            world_runtime_summary = self._format_world_runtime_summary()
+            system_prompt = WORLD_SECTION_SYSTEM_PROMPT_TEMPLATE.format(
+                report_title=outline.title,
+                report_summary=outline.summary,
+                simulation_requirement=self.simulation_requirement,
+                section_title=section.title,
+                world_runtime_summary=world_runtime_summary,
+                tools_description=self._get_tools_description(),
+            )
+        else:
+            system_prompt = SECTION_SYSTEM_PROMPT_TEMPLATE.format(
+                report_title=outline.title,
+                report_summary=outline.summary,
+                simulation_requirement=self.simulation_requirement,
+                section_title=section.title,
+                tools_description=self._get_tools_description(),
+            )
 
         # 构建用户prompt - 每个已完成章节各传入最大4000字
         if previous_sections:
@@ -1286,7 +1529,7 @@ class ReportAgent:
         min_tool_calls = 3  # 最少工具调用次数
         conflict_retries = 0  # 工具调用与Final Answer同时出现的连续冲突次数
         used_tools = set()  # 记录已调用过的工具名
-        all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        all_tools = set(self.tools.keys())
 
         # 报告上下文，用于InsightForge的子问题生成
         report_context = f"章节标题: {section.title}\n模拟需求: {self.simulation_requirement}"
@@ -1567,6 +1810,7 @@ class ReportAgent:
             simulation_id=self.simulation_id,
             graph_id=self.graph_id,
             simulation_requirement=self.simulation_requirement,
+            simulation_mode=self.simulation_mode,
             status=ReportStatus.PENDING,
             created_at=datetime.now().isoformat()
         )
@@ -1800,11 +2044,20 @@ class ReportAgent:
         except Exception as e:
             logger.warning(f"获取报告内容失败: {e}")
         
-        system_prompt = CHAT_SYSTEM_PROMPT_TEMPLATE.format(
-            simulation_requirement=self.simulation_requirement,
-            report_content=report_content if report_content else "（暂无报告）",
-            tools_description=self._get_tools_description(),
-        )
+        if self.simulation_mode == SimulationMode.WORLD.value:
+            world_runtime_summary = self._format_world_runtime_summary()
+            system_prompt = WORLD_CHAT_SYSTEM_PROMPT_TEMPLATE.format(
+                simulation_requirement=self.simulation_requirement,
+                report_content=report_content if report_content else "（暂无报告）",
+                world_runtime_summary=world_runtime_summary,
+                tools_description=self._get_tools_description(),
+            )
+        else:
+            system_prompt = CHAT_SYSTEM_PROMPT_TEMPLATE.format(
+                simulation_requirement=self.simulation_requirement,
+                report_content=report_content if report_content else "（暂无报告）",
+                tools_description=self._get_tools_description(),
+            )
 
         # 构建消息
         messages = [{"role": "system", "content": system_prompt}]
@@ -2487,6 +2740,7 @@ class ReportManager:
             simulation_id=data['simulation_id'],
             graph_id=data['graph_id'],
             simulation_requirement=data['simulation_requirement'],
+            simulation_mode=SimulationMode.normalize(data.get('simulation_mode')).value,
             status=ReportStatus(data['status']),
             outline=outline,
             markdown_content=markdown_content,

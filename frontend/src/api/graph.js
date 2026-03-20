@@ -2,7 +2,7 @@ import service, { requestWithRetry } from './index'
 
 /**
  * 生成本体（上传文档和模拟需求）
- * @param {Object} data - 包含files, simulation_requirement, project_name等
+ * @param {Object} data - 包含files, simulation_requirement, simulation_mode, project_name等
  * @returns {Promise}
  */
 export function generateOntology(formData) {

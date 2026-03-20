@@ -1,0 +1,65 @@
+{
+  "case_set_id": "campaign_20260319_stability_goldens",
+  "case_set_label": "Campaign 20260319 Stability Goldens",
+  "name": "world-case-set-campaign-20260319-stability-goldens",
+  "description": "Promoted long-term copy of the two stability finalists from the 2026-03-19 campaign using persistent selectors.",
+  "source_campaign_dir": "/Users/atou/MiroFish/backend/uploads/evals/world-model-campaign-20260319-122201",
+  "source_stage": "stability",
+  "selector_strategy": "Each campaign_* selector has been promoted to its persistent eval_* equivalent.",
+  "score_profile": "progression_mini",
+  "shared_max_rounds": 3,
+  "shared_repeat_count": 3,
+  "shared_rewrite_agent_selectors": true,
+  "shared_runtime_overrides": {
+    "intent_agents_per_tick": 4,
+    "intent_concurrency": 4,
+    "resolver_cluster_size": 2,
+    "resolver_cluster_concurrency": 2,
+    "max_active_events": 4,
+    "max_queued_events": 6,
+    "max_event_duration_ticks": 2,
+    "resolver_salvage_on_zero_accept": true,
+    "provider_preflight_check": true,
+    "provider_max_retries": 1,
+    "actor_on_failure": "defer",
+    "resolver_on_failure": "pause"
+  },
+  "cases": [
+    {
+      "case_id": "golden-throughput-qwen-flash-qwen-plus",
+      "label": "Golden Throughput: Qwen 3.5 Flash + Qwen 3.5 Plus",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_aliyun_qwen35_plus",
+      "notes": "Archived stability finalist and promoted default strategy from the 2026-03-19 campaign.",
+      "preset_id": "recommended_throughput",
+      "source_case_id": "stability-progression-pair-actor-aliyun-qwen35-flash-resolver-aliyun-qwen35-plus",
+      "source_metrics": {
+        "overall": 72.4,
+        "progression": 75.6,
+        "resilience": 74.6,
+        "simulation_total_s": 476.937,
+        "events_completed": 4.333,
+        "salvage_tick_rate": 0.444,
+        "provider_wait_total_s": 1.333
+      }
+    },
+    {
+      "case_id": "golden-stable-qwen-flash-gpt54-deep",
+      "label": "Golden Stable: Qwen 3.5 Flash + GPT-5.4 deep",
+      "actor_selector": "eval_aliyun_qwen35_flash",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "notes": "Archived stability finalist and promoted stable strategy from the 2026-03-19 campaign.",
+      "preset_id": "recommended_stable",
+      "source_case_id": "stability-progression-pair-actor-aliyun-qwen35-flash-resolver-litellm-gpt54-deep",
+      "source_metrics": {
+        "overall": 72.1,
+        "progression": 69.8,
+        "resilience": 89.5,
+        "simulation_total_s": 407.583,
+        "events_completed": 4.333,
+        "salvage_tick_rate": 0.222,
+        "provider_wait_total_s": 0.0
+      }
+    }
+  ]
+}

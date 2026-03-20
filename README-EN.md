@@ -86,10 +86,10 @@ Click the image to watch MiroFish's deep prediction of the lost ending based on 
 ## 🔄 Workflow
 
 1. **Graph Building**: Seed extraction & Individual/collective memory injection & GraphRAG construction
-2. **Environment Setup**: Entity relationship extraction & Persona generation & Agent configuration injection
-3. **Simulation**: Dual-platform parallel simulation & Auto-parse prediction requirements & Dynamic temporal memory updates
+2. **Environment Setup**: Build different runtimes by mode. Social mode produces Twitter/Reddit agents; world mode produces world entity cards, progression rules, and plot threads
+3. **Simulation**: Social mode runs dual-platform diffusion; world mode runs multi-round world-event progression
 4. **Report Generation**: ReportAgent with rich toolset for deep interaction with post-simulation environment
-5. **Deep Interaction**: Chat with any agent in the simulated world & Interact with ReportAgent
+5. **Deep Interaction**: Social mode supports agent interviews plus ReportAgent; world mode keeps ReportAgent as the default analysis surface over logs, graph context, and the generated report
 
 ## 🚀 Quick Start
 
@@ -112,20 +112,53 @@ cp .env.example .env
 # Edit the .env file and fill in the required API keys
 ```
 
-**Required Environment Variables:**
+**Recommended Setup:**
+
+Prefer using OpenClaw as the single source of truth for providers / models, and keep `llm_registry.json` for route mapping plus speed / reasoning overrides.
+The repo includes `llm_registry.json.example` as a template. Copy it to `llm_registry.json` locally and edit it.
+
+**Minimum `.env` entries:**
 
 ```env
-# LLM API Configuration (supports any LLM API with OpenAI SDK format)
-# Recommended: Alibaba Qwen-plus model via Bailian Platform: https://bailian.console.aliyun.com/
-# High consumption, try simulations with fewer than 40 rounds first
+# Registry source and path (recommended)
+LLM_REGISTRY_SOURCE=auto
+LLM_REGISTRY_PATH=/absolute/path/to/MiroFish/llm_registry.json
+OPENCLAW_CONFIG_PATH=/Users/<you>/.openclaw/openclaw.json
+
+# LLM API configuration (legacy fallback; only used if OpenClaw / registry resolution misses)
 LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_MODEL_NAME=qwen-plus
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL_NAME=gpt-5.4
+
+# Optional second provider for concurrent agents / parallel simulation
+LLM_BOOST_API_KEY=
+LLM_BOOST_BASE_URL=
+LLM_BOOST_MODEL_NAME=
 
 # Zep Cloud Configuration
 # Free monthly quota is sufficient for simple usage: https://app.getzep.com/
 ZEP_API_KEY=your_zep_api_key
 ```
+
+`llm_registry.json` now supports:
+- multiple providers
+- multiple model profiles
+- route-based model assignment for different agents / services
+- per-world-agent selection through `llm_selector`
+- direct OpenClaw reuse:
+  - `openclaw_agent`: reuse the primary model of an OpenClaw agent
+  - `openclaw_model`: use a full `provider/model` selector
+  - `openclaw_alias`: reuse an alias from `agents.defaults.models.*.alias`
+
+Resolution order:
+- explicit `openclaw:` selector
+- `llm_registry.json`
+- OpenClaw default model / same-named agent
+- legacy `LLM_* / WORLD_*_LLM_*`
+
+Notes:
+- The current MiroFish backend still uses the OpenAI SDK, so it can only directly reuse OpenClaw providers that expose an OpenAI-compatible API.
+- If `llm_registry.json` is absent, the system can still read the default model directly from `OPENCLAW_CONFIG_PATH`.
 
 #### 2. Install Dependencies
 
@@ -154,6 +187,12 @@ npm run dev
 **Service URLs:**
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:5001`
+
+#### 4. Choose a Mode
+
+- **Social Mode**: Upload news, policy drafts, or public-opinion material, then ask how attention will spread or evolve. MiroFish will prepare Twitter/Reddit agents and keep interview access in the final stage.
+- **World Mode**: Upload lore, character sheets, story outlines, or system rules, then ask how the world should continue to evolve. MiroFish will prepare a dedicated world runtime, generate progression rounds, and expose the outcome through event feeds plus ReportAgent analysis.
+- **Current Limitation**: World mode does not enable the live interview environment; deep interaction is intentionally routed through ReportAgent only.
 
 **Start Individually:**
 

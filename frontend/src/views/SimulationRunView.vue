@@ -50,6 +50,20 @@
       <!-- Right Panel: Step3 开始模拟 -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
         <Step3Simulation
+          v-if="simulationMode !== 'world'"
+          :simulationId="currentSimulationId"
+          :maxRounds="maxRounds"
+          :minutesPerRound="minutesPerRound"
+          :projectData="projectData"
+          :graphData="graphData"
+          :systemLogs="systemLogs"
+          @go-back="handleGoBack"
+          @next-step="handleNextStep"
+          @add-log="addLog"
+          @update-status="updateStatus"
+        />
+        <Step3WorldSimulation
+          v-else
           :simulationId="currentSimulationId"
           :maxRounds="maxRounds"
           :minutesPerRound="minutesPerRound"
@@ -71,6 +85,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
+import Step3WorldSimulation from '../components/Step3WorldSimulation.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, getSimulationConfig, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
 
@@ -94,7 +109,8 @@ const projectData = ref(null)
 const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
-const currentStatus = ref('processing') // processing | completed | error
+const currentStatus = ref('processing') // processing | paused | completed | error
+const simulationMode = ref('social')
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -116,6 +132,7 @@ const statusClass = computed(() => {
 
 const statusText = computed(() => {
   if (currentStatus.value === 'error') return 'Error'
+  if (currentStatus.value === 'paused') return 'Paused'
   if (currentStatus.value === 'completed') return 'Completed'
   return 'Running'
 })
@@ -174,7 +191,7 @@ const handleGoBack = async () => {
       }
     } else {
       // 环境未运行，检查是否需要停止进程
-      if (isSimulating.value) {
+      if (isSimulating.value || currentStatus.value === 'paused') {
         addLog('正在停止模拟进程...')
         try {
           await stopSimulation({ simulation_id: currentSimulationId.value })
@@ -207,6 +224,7 @@ const loadSimulationData = async () => {
     const simRes = await getSimulation(currentSimulationId.value)
     if (simRes.success && simRes.data) {
       const simData = simRes.data
+      simulationMode.value = simData.simulation_mode || 'social'
       
       // 获取 simulation config 以获取 minutes_per_round
       try {
@@ -224,6 +242,7 @@ const loadSimulationData = async () => {
         const projRes = await getProject(simData.project_id)
         if (projRes.success && projRes.data) {
           projectData.value = projRes.data
+          simulationMode.value = projRes.data.simulation_mode || simulationMode.value
           addLog(`项目加载成功: ${projRes.data.project_id}`)
           
           // 获取 graph 数据
@@ -420,6 +439,7 @@ onUnmounted(() => {
 }
 
 .status-indicator.processing .dot { background: #FF5722; animation: pulse 1s infinite; }
+.status-indicator.paused .dot { background: #FFC107; }
 .status-indicator.completed .dot { background: #4CAF50; }
 .status-indicator.error .dot { background: #F44336; }
 
@@ -444,4 +464,3 @@ onUnmounted(() => {
   border-right: 1px solid #EAEAEA;
 }
 </style>
-

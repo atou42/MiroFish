@@ -6,7 +6,6 @@ OASIS模拟管理器
 
 import os
 import json
-import shutil
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,9 +13,14 @@ from enum import Enum
 
 from ..config import Config
 from ..utils.logger import get_logger
-from .zep_entity_reader import ZepEntityReader, FilteredEntities
-from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
-from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
+from ..models.simulation_mode import SimulationMode
+from ..config import Config
+from .zep_entity_reader import ZepEntityReader
+from .oasis_profile_generator import OasisProfileGenerator
+from .simulation_config_generator import SimulationConfigGenerator
+from .world_profile_generator import WorldProfileGenerator
+from .world_config_generator import WorldConfigGenerator
+from .world_preset_registry import WorldPresetRegistry
 
 logger = get_logger('mirofish.simulation')
 
@@ -45,6 +49,7 @@ class SimulationState:
     simulation_id: str
     project_id: str
     graph_id: str
+    simulation_mode: str = SimulationMode.SOCIAL.value
     
     # 平台启用状态
     enable_twitter: bool = True
@@ -61,6 +66,7 @@ class SimulationState:
     # 配置生成信息
     config_generated: bool = False
     config_reasoning: str = ""
+    runtime_metadata: Dict[str, Any] = field(default_factory=dict)
     
     # 运行时数据
     current_round: int = 0
@@ -80,6 +86,7 @@ class SimulationState:
             "simulation_id": self.simulation_id,
             "project_id": self.project_id,
             "graph_id": self.graph_id,
+            "simulation_mode": self.simulation_mode,
             "enable_twitter": self.enable_twitter,
             "enable_reddit": self.enable_reddit,
             "status": self.status.value,
@@ -88,6 +95,7 @@ class SimulationState:
             "entity_types": self.entity_types,
             "config_generated": self.config_generated,
             "config_reasoning": self.config_reasoning,
+            "runtime_metadata": self.runtime_metadata,
             "current_round": self.current_round,
             "twitter_status": self.twitter_status,
             "reddit_status": self.reddit_status,
@@ -102,11 +110,13 @@ class SimulationState:
             "simulation_id": self.simulation_id,
             "project_id": self.project_id,
             "graph_id": self.graph_id,
+            "simulation_mode": self.simulation_mode,
             "status": self.status.value,
             "entities_count": self.entities_count,
             "profiles_count": self.profiles_count,
             "entity_types": self.entity_types,
             "config_generated": self.config_generated,
+            "runtime_metadata": self.runtime_metadata,
             "error": self.error,
         }
 
@@ -171,6 +181,7 @@ class SimulationManager:
             simulation_id=simulation_id,
             project_id=data.get("project_id", ""),
             graph_id=data.get("graph_id", ""),
+            simulation_mode=SimulationMode.normalize(data.get("simulation_mode")).value,
             enable_twitter=data.get("enable_twitter", True),
             enable_reddit=data.get("enable_reddit", True),
             status=SimulationStatus(data.get("status", "created")),
@@ -179,6 +190,7 @@ class SimulationManager:
             entity_types=data.get("entity_types", []),
             config_generated=data.get("config_generated", False),
             config_reasoning=data.get("config_reasoning", ""),
+            runtime_metadata=data.get("runtime_metadata", {}),
             current_round=data.get("current_round", 0),
             twitter_status=data.get("twitter_status", "not_started"),
             reddit_status=data.get("reddit_status", "not_started"),
@@ -196,6 +208,7 @@ class SimulationManager:
         graph_id: str,
         enable_twitter: bool = True,
         enable_reddit: bool = True,
+        simulation_mode: str = SimulationMode.SOCIAL.value,
     ) -> SimulationState:
         """
         创建新的模拟
@@ -216,8 +229,9 @@ class SimulationManager:
             simulation_id=simulation_id,
             project_id=project_id,
             graph_id=graph_id,
-            enable_twitter=enable_twitter,
-            enable_reddit=enable_reddit,
+            simulation_mode=SimulationMode.normalize(simulation_mode).value,
+            enable_twitter=enable_twitter if SimulationMode.normalize(simulation_mode) == SimulationMode.SOCIAL else False,
+            enable_reddit=enable_reddit if SimulationMode.normalize(simulation_mode) == SimulationMode.SOCIAL else False,
             status=SimulationStatus.CREATED,
         )
         
@@ -234,7 +248,8 @@ class SimulationManager:
         defined_entity_types: Optional[List[str]] = None,
         use_llm_for_profiles: bool = True,
         progress_callback: Optional[callable] = None,
-        parallel_profile_count: int = 3
+        parallel_profile_count: int = 3,
+        world_preset_id: Optional[str] = None,
     ) -> SimulationState:
         """
         准备模拟环境（全程自动化）
@@ -299,139 +314,30 @@ class SimulationManager:
                 state.error = "没有找到符合条件的实体，请检查图谱是否正确构建"
                 self._save_simulation_state(state)
                 return state
-            
-            # ========== 阶段2: 生成Agent Profile ==========
-            total_entities = len(filtered.entities)
-            
-            if progress_callback:
-                progress_callback(
-                    "generating_profiles", 0, 
-                    "开始生成...",
-                    current=0,
-                    total=total_entities
+            if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+                self._prepare_world_runtime(
+                    state=state,
+                    sim_dir=sim_dir,
+                    filtered=filtered,
+                    simulation_id=simulation_id,
+                    simulation_requirement=simulation_requirement,
+                    document_text=document_text,
+                    use_llm_for_profiles=use_llm_for_profiles,
+                    progress_callback=progress_callback,
+                    parallel_profile_count=parallel_profile_count,
+                    world_preset_id=world_preset_id,
                 )
-            
-            # 传入graph_id以启用Zep检索功能，获取更丰富的上下文
-            generator = OasisProfileGenerator(graph_id=state.graph_id)
-            
-            def profile_progress(current, total, msg):
-                if progress_callback:
-                    progress_callback(
-                        "generating_profiles", 
-                        int(current / total * 100), 
-                        msg,
-                        current=current,
-                        total=total,
-                        item_name=msg
-                    )
-            
-            # 设置实时保存的文件路径（优先使用 Reddit JSON 格式）
-            realtime_output_path = None
-            realtime_platform = "reddit"
-            if state.enable_reddit:
-                realtime_output_path = os.path.join(sim_dir, "reddit_profiles.json")
-                realtime_platform = "reddit"
-            elif state.enable_twitter:
-                realtime_output_path = os.path.join(sim_dir, "twitter_profiles.csv")
-                realtime_platform = "twitter"
-            
-            profiles = generator.generate_profiles_from_entities(
-                entities=filtered.entities,
-                use_llm=use_llm_for_profiles,
-                progress_callback=profile_progress,
-                graph_id=state.graph_id,  # 传入graph_id用于Zep检索
-                parallel_count=parallel_profile_count,  # 并行生成数量
-                realtime_output_path=realtime_output_path,  # 实时保存路径
-                output_platform=realtime_platform  # 输出格式
-            )
-            
-            state.profiles_count = len(profiles)
-            
-            # 保存Profile文件（注意：Twitter使用CSV格式，Reddit使用JSON格式）
-            # Reddit 已经在生成过程中实时保存了，这里再保存一次确保完整性
-            if progress_callback:
-                progress_callback(
-                    "generating_profiles", 95, 
-                    "保存Profile文件...",
-                    current=total_entities,
-                    total=total_entities
-                )
-            
-            if state.enable_reddit:
-                generator.save_profiles(
-                    profiles=profiles,
-                    file_path=os.path.join(sim_dir, "reddit_profiles.json"),
-                    platform="reddit"
-                )
-            
-            if state.enable_twitter:
-                # Twitter使用CSV格式！这是OASIS的要求
-                generator.save_profiles(
-                    profiles=profiles,
-                    file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
-                    platform="twitter"
-                )
-            
-            if progress_callback:
-                progress_callback(
-                    "generating_profiles", 100, 
-                    f"完成，共 {len(profiles)} 个Profile",
-                    current=len(profiles),
-                    total=len(profiles)
-                )
-            
-            # ========== 阶段3: LLM智能生成模拟配置 ==========
-            if progress_callback:
-                progress_callback(
-                    "generating_config", 0, 
-                    "正在分析模拟需求...",
-                    current=0,
-                    total=3
-                )
-            
-            config_generator = SimulationConfigGenerator()
-            
-            if progress_callback:
-                progress_callback(
-                    "generating_config", 30, 
-                    "正在调用LLM生成配置...",
-                    current=1,
-                    total=3
-                )
-            
-            sim_params = config_generator.generate_config(
-                simulation_id=simulation_id,
-                project_id=state.project_id,
-                graph_id=state.graph_id,
-                simulation_requirement=simulation_requirement,
-                document_text=document_text,
-                entities=filtered.entities,
-                enable_twitter=state.enable_twitter,
-                enable_reddit=state.enable_reddit
-            )
-            
-            if progress_callback:
-                progress_callback(
-                    "generating_config", 70, 
-                    "正在保存配置文件...",
-                    current=2,
-                    total=3
-                )
-            
-            # 保存配置文件
-            config_path = os.path.join(sim_dir, "simulation_config.json")
-            with open(config_path, 'w', encoding='utf-8') as f:
-                f.write(sim_params.to_json())
-            
-            state.config_generated = True
-            state.config_reasoning = sim_params.generation_reasoning
-            
-            if progress_callback:
-                progress_callback(
-                    "generating_config", 100, 
-                    "配置生成完成",
-                    current=3,
-                    total=3
+            else:
+                self._prepare_social_runtime(
+                    state=state,
+                    sim_dir=sim_dir,
+                    filtered=filtered,
+                    simulation_id=simulation_id,
+                    simulation_requirement=simulation_requirement,
+                    document_text=document_text,
+                    use_llm_for_profiles=use_llm_for_profiles,
+                    progress_callback=progress_callback,
+                    parallel_profile_count=parallel_profile_count,
                 )
             
             # 注意：运行脚本保留在 backend/scripts/ 目录，不再复制到模拟目录
@@ -454,7 +360,286 @@ class SimulationManager:
             state.error = str(e)
             self._save_simulation_state(state)
             raise
-    
+
+    def _prepare_social_runtime(
+        self,
+        state: SimulationState,
+        sim_dir: str,
+        filtered: Any,
+        simulation_id: str,
+        simulation_requirement: str,
+        document_text: str,
+        use_llm_for_profiles: bool,
+        progress_callback: Optional[callable],
+        parallel_profile_count: int,
+    ) -> None:
+        total_entities = len(filtered.entities)
+
+        if progress_callback:
+            progress_callback(
+                "generating_profiles",
+                0,
+                "开始生成...",
+                current=0,
+                total=total_entities,
+            )
+
+        generator = OasisProfileGenerator(graph_id=state.graph_id)
+
+        def profile_progress(current, total, msg):
+            if progress_callback:
+                progress_callback(
+                    "generating_profiles",
+                    int(current / max(total, 1) * 100),
+                    msg,
+                    current=current,
+                    total=total,
+                    item_name=msg,
+                )
+
+        realtime_output_path = None
+        realtime_platform = "reddit"
+        if state.enable_reddit:
+            realtime_output_path = os.path.join(sim_dir, "reddit_profiles.json")
+            realtime_platform = "reddit"
+        elif state.enable_twitter:
+            realtime_output_path = os.path.join(sim_dir, "twitter_profiles.csv")
+            realtime_platform = "twitter"
+
+        profiles = generator.generate_profiles_from_entities(
+            entities=filtered.entities,
+            use_llm=use_llm_for_profiles,
+            progress_callback=profile_progress,
+            graph_id=state.graph_id,
+            parallel_count=parallel_profile_count,
+            realtime_output_path=realtime_output_path,
+            output_platform=realtime_platform,
+        )
+
+        state.profiles_count = len(profiles)
+
+        if progress_callback:
+            progress_callback(
+                "generating_profiles",
+                95,
+                "保存Profile文件...",
+                current=total_entities,
+                total=total_entities,
+            )
+
+        if state.enable_reddit:
+            generator.save_profiles(
+                profiles=profiles,
+                file_path=os.path.join(sim_dir, "reddit_profiles.json"),
+                platform="reddit",
+            )
+
+        if state.enable_twitter:
+            generator.save_profiles(
+                profiles=profiles,
+                file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
+                platform="twitter",
+            )
+
+        if progress_callback:
+            progress_callback(
+                "generating_profiles",
+                100,
+                f"完成，共 {len(profiles)} 个Profile",
+                current=len(profiles),
+                total=len(profiles),
+            )
+
+        if progress_callback:
+            progress_callback(
+                "generating_config",
+                0,
+                "正在分析模拟需求...",
+                current=0,
+                total=3,
+            )
+
+        config_generator = SimulationConfigGenerator()
+
+        if progress_callback:
+            progress_callback(
+                "generating_config",
+                30,
+                "正在调用LLM生成配置...",
+                current=1,
+                total=3,
+            )
+
+        sim_params = config_generator.generate_config(
+            simulation_id=simulation_id,
+            project_id=state.project_id,
+            graph_id=state.graph_id,
+            simulation_requirement=simulation_requirement,
+            document_text=document_text,
+            entities=filtered.entities,
+            enable_twitter=state.enable_twitter,
+            enable_reddit=state.enable_reddit,
+        )
+
+        if progress_callback:
+            progress_callback(
+                "generating_config",
+                70,
+                "正在保存配置文件...",
+                current=2,
+                total=3,
+            )
+
+        config_path = os.path.join(sim_dir, "simulation_config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(sim_params.to_json())
+
+        state.config_generated = True
+        state.config_reasoning = sim_params.generation_reasoning
+        state.runtime_metadata = {
+            "profile_format": "dual_platform",
+            "profiles_file": "reddit_profiles.json" if state.enable_reddit else "twitter_profiles.csv",
+        }
+
+        if progress_callback:
+            progress_callback(
+                "generating_config",
+                100,
+                "配置生成完成",
+                current=3,
+                total=3,
+            )
+
+    def _prepare_world_runtime(
+        self,
+        state: SimulationState,
+        sim_dir: str,
+        filtered: Any,
+        simulation_id: str,
+        simulation_requirement: str,
+        document_text: str,
+        use_llm_for_profiles: bool,
+        progress_callback: Optional[callable],
+        parallel_profile_count: int,
+        world_preset_id: Optional[str],
+    ) -> None:
+        world_preset = WorldPresetRegistry.get_preset(world_preset_id)
+        total_entities = len(filtered.entities)
+        if progress_callback:
+            progress_callback(
+                "generating_profiles",
+                0,
+                "正在构建世界实体卡...",
+                current=0,
+                total=total_entities,
+            )
+
+        profile_generator = WorldProfileGenerator()
+
+        def profile_progress(current, total, msg):
+            if progress_callback:
+                progress_callback(
+                    "generating_profiles",
+                    int(current / max(total, 1) * 100),
+                    f"整理世界实体: {msg}",
+                    current=current,
+                    total=total,
+                    item_name=msg,
+                )
+
+        world_profiles_path = os.path.join(sim_dir, "world_profiles.json")
+        profiles = profile_generator.generate_profiles_from_entities(
+            entities=filtered.entities,
+            use_llm=use_llm_for_profiles,
+            progress_callback=profile_progress,
+            realtime_output_path=world_profiles_path,
+            parallel_count=parallel_profile_count,
+            world_preset=world_preset,
+        )
+
+        state.profiles_count = len(profiles)
+        profile_generator.save_profiles(profiles, world_profiles_path)
+
+        if progress_callback:
+            progress_callback(
+                "generating_profiles",
+                100,
+                f"完成，共 {len(profiles)} 个世界实体卡",
+                current=len(profiles),
+                total=len(profiles),
+            )
+
+        if progress_callback:
+            progress_callback(
+                "generating_config",
+                0,
+                "正在梳理世界推进节奏...",
+                current=0,
+                total=3,
+            )
+
+        config_generator = WorldConfigGenerator()
+        world_config = config_generator.generate_config(
+            simulation_id=simulation_id,
+            project_id=state.project_id,
+            graph_id=state.graph_id,
+            simulation_requirement=simulation_requirement,
+            document_text=document_text,
+            entities=filtered.entities,
+            profiles=profiles,
+            world_preset=world_preset,
+        )
+
+        if progress_callback:
+            progress_callback(
+                "generating_config",
+                70,
+                "正在保存 world 配置...",
+                current=2,
+                total=3,
+            )
+
+        config_path = os.path.join(sim_dir, "simulation_config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(world_config.to_json())
+
+        state.config_generated = True
+        state.config_reasoning = world_config.generation_reasoning
+        state.enable_twitter = False
+        state.enable_reddit = False
+        actor_llm_config = Config.get_llm_config(selector=world_preset.actor_selector or "WORLD_AGENT")
+        resolver_llm_config = Config.get_llm_config(selector=world_preset.resolver_selector or "WORLD_RESOLVER")
+
+        state.runtime_metadata = {
+            "profile_format": "world",
+            "profiles_file": "world_profiles.json",
+            "world_preset_id": world_preset.preset_id,
+            "world_preset_label": world_preset.label,
+            "world_preset_strategy_class": world_preset.strategy_class,
+            "world_preset_actor_selector": world_preset.actor_selector,
+            "world_preset_resolver_selector": world_preset.resolver_selector,
+            "world_preset_tags": world_preset.tags,
+            "actor_count": len(world_config.agent_configs),
+            "pressure_track_count": len(world_config.pressure_tracks),
+            "tick_unit": world_config.time_config.get("scene_unit", "tick"),
+            "runtime_config": world_config.runtime_config,
+            "world_agent_model": actor_llm_config.get("model_name"),
+            "world_agent_provider": actor_llm_config.get("provider_id"),
+            "world_agent_profile": actor_llm_config.get("profile_id"),
+            "world_resolver_model": resolver_llm_config.get("model_name"),
+            "world_resolver_provider": resolver_llm_config.get("provider_id"),
+            "world_resolver_profile": resolver_llm_config.get("profile_id"),
+        }
+
+        if progress_callback:
+            progress_callback(
+                "generating_config",
+                100,
+                "world 配置生成完成",
+                current=3,
+                total=3,
+            )
+
     def get_simulation(self, simulation_id: str) -> Optional[SimulationState]:
         """获取模拟状态"""
         return self._load_simulation_state(simulation_id)
@@ -484,11 +669,23 @@ class SimulationManager:
             raise ValueError(f"模拟不存在: {simulation_id}")
         
         sim_dir = self._get_simulation_dir(simulation_id)
-        profile_path = os.path.join(sim_dir, f"{platform}_profiles.json")
+        if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+            profile_path = os.path.join(sim_dir, "world_profiles.json")
+        else:
+            if platform == "twitter":
+                profile_path = os.path.join(sim_dir, "twitter_profiles.csv")
+            else:
+                profile_path = os.path.join(sim_dir, "reddit_profiles.json")
         
         if not os.path.exists(profile_path):
             return []
-        
+
+        if profile_path.endswith(".csv"):
+            import csv
+
+            with open(profile_path, 'r', encoding='utf-8') as f:
+                return list(csv.DictReader(f))
+
         with open(profile_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     
@@ -508,6 +705,23 @@ class SimulationManager:
         sim_dir = self._get_simulation_dir(simulation_id)
         config_path = os.path.join(sim_dir, "simulation_config.json")
         scripts_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../scripts'))
+        state = self._load_simulation_state(simulation_id)
+        mode = SimulationMode.normalize(state.simulation_mode if state else None)
+
+        if mode == SimulationMode.WORLD:
+            return {
+                "simulation_dir": sim_dir,
+                "scripts_dir": scripts_dir,
+                "config_file": config_path,
+                "commands": {
+                    "world": f"python {scripts_dir}/run_world_simulation.py --config {config_path}",
+                },
+                "instructions": (
+                    f"1. 激活conda环境: conda activate MiroFish\n"
+                    f"2. 运行 world 模拟:\n"
+                    f"   - python {scripts_dir}/run_world_simulation.py --config {config_path}"
+                ),
+            }
         
         return {
             "simulation_dir": sim_dir,

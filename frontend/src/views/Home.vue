@@ -172,15 +172,40 @@
               <div class="console-header">
                 <span class="console-label">>_ 02 / 模拟提示词</span>
               </div>
+              <div class="mode-selector">
+                <button
+                  type="button"
+                  class="mode-pill"
+                  :class="{ active: formData.simulationMode === 'social' }"
+                  :disabled="loading"
+                  @click="formData.simulationMode = 'social'"
+                >
+                  Social
+                </button>
+                <button
+                  type="button"
+                  class="mode-pill"
+                  :class="{ active: formData.simulationMode === 'world' }"
+                  :disabled="loading"
+                  @click="formData.simulationMode = 'world'"
+                >
+                  World
+                </button>
+                <span class="mode-hint">
+                  {{ formData.simulationMode === 'world' ? '世界观推进 / 剧情演化' : '社交平台舆情 / 群体扩散' }}
+                </span>
+              </div>
               <div class="input-wrapper">
                 <textarea
                   v-model="formData.simulationRequirement"
                   class="code-input"
-                  placeholder="// 用自然语言输入模拟或预测需求（例.武大若发布撤销肖某处分的公告，会引发什么舆情走向）"
+                  :placeholder="formData.simulationMode === 'world'
+                    ? '// 输入世界观推进需求（例.在一个寒潮与边境战争并存的王国中，给出三个月后势力如何演化）'
+                    : '// 用自然语言输入模拟或预测需求（例.武大若发布撤销肖某处分的公告，会引发什么舆情走向）'"
                   rows="6"
                   :disabled="loading"
                 ></textarea>
-                <div class="model-badge">引擎: MiroFish-V1.0</div>
+                <div class="model-badge">引擎: MiroFish-V1.0 / {{ formData.simulationMode }}</div>
               </div>
             </div>
 
@@ -215,7 +240,8 @@ const router = useRouter()
 
 // 表单数据
 const formData = ref({
-  simulationRequirement: ''
+  simulationRequirement: '',
+  simulationMode: 'social'
 })
 
 // 文件列表
@@ -294,7 +320,11 @@ const startSimulation = () => {
   
   // 存储待上传的数据
   import('../store/pendingUpload.js').then(({ setPendingUpload }) => {
-    setPendingUpload(files.value, formData.value.simulationRequirement)
+    setPendingUpload(
+      files.value,
+      formData.value.simulationRequirement,
+      formData.value.simulationMode
+    )
     
     // 立即跳转到Process页面（使用特殊标识表示新建项目）
     router.push({
@@ -371,6 +401,36 @@ const startSimulation = () => {
 
 .arrow {
   font-family: sans-serif;
+}
+
+.mode-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.mode-pill {
+  border: 1px solid var(--border);
+  background: var(--white);
+  color: var(--black);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mode-pill.active {
+  background: var(--black);
+  color: var(--white);
+  border-color: var(--black);
+}
+
+.mode-hint {
+  color: var(--gray-text);
+  font-size: 0.82rem;
 }
 
 /* 主要内容区 */

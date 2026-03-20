@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+import math
 import asyncio
 import threading
 import subprocess
@@ -20,6 +21,12 @@ from queue import Queue
 
 from ..config import Config
 from ..utils.logger import get_logger
+from ..utils.world_run_lock import (
+    cleanup_world_run_lease,
+    inspect_world_run_lease,
+    world_run_paths_for_simulation_dir,
+)
+from ..models.simulation_mode import SimulationMode
 from .zep_graph_memory_updater import ZepGraphMemoryManager
 from .simulation_ipc import SimulationIPCClient, CommandType, IPCResponse
 
@@ -101,6 +108,7 @@ class RoundSummary:
 class SimulationRunState:
     """模拟运行状态（实时）"""
     simulation_id: str
+    simulation_mode: str = SimulationMode.SOCIAL.value
     runner_status: RunnerStatus = RunnerStatus.IDLE
     
     # 进度信息
@@ -118,12 +126,15 @@ class SimulationRunState:
     # 平台状态
     twitter_running: bool = False
     reddit_running: bool = False
+    world_running: bool = False
     twitter_actions_count: int = 0
     reddit_actions_count: int = 0
+    world_actions_count: int = 0
     
     # 平台完成状态（通过检测 actions.jsonl 中的 simulation_end 事件）
     twitter_completed: bool = False
     reddit_completed: bool = False
+    world_completed: bool = False
     
     # 每轮摘要
     rounds: List[RoundSummary] = field(default_factory=list)
@@ -131,6 +142,14 @@ class SimulationRunState:
     # 最近动作（用于前端实时展示）
     recent_actions: List[AgentAction] = field(default_factory=list)
     max_recent_actions: int = 50
+    world_recent_events: List[Dict[str, Any]] = field(default_factory=list)
+    max_world_recent_events: int = 120
+    world_active_events: List[Dict[str, Any]] = field(default_factory=list)
+    world_queued_events: List[Dict[str, Any]] = field(default_factory=list)
+    world_phase_counts: Dict[str, int] = field(default_factory=dict)
+    world_completed_events_count: int = 0
+    world_current_phase: str = "idle"
+    latest_snapshot: Optional[Dict[str, Any]] = None
     
     # 时间戳
     started_at: Optional[str] = None
@@ -151,14 +170,158 @@ class SimulationRunState:
         
         if action.platform == "twitter":
             self.twitter_actions_count += 1
-        else:
+        elif action.platform == "reddit":
             self.reddit_actions_count += 1
+        else:
+            self.world_actions_count += 1
         
         self.updated_at = datetime.now().isoformat()
+
+    def add_world_event(self, event: Dict[str, Any]):
+        """添加 world 生命周期记录并维护并发状态摘要。"""
+        raw_type = event.get("event_type") or event.get("action_type")
+        event_type = str(raw_type or "").strip().lower()
+        if not event_type:
+            return
+
+        self.world_phase_counts[event_type] = self.world_phase_counts.get(event_type, 0) + 1
+        normalized = self._normalize_world_event(event, event_type)
+
+        if event_type == "tick_blocked":
+            self.world_current_phase = event_type
+        elif event_type in {"tick_start", "tick_end", "provider_waiting", "provider_recovered"}:
+            self.world_current_phase = normalized.get("phase") or event_type
+        elif event_type == "simulation_end":
+            self.world_current_phase = "completed"
+        elif event_type == "simulation_failed":
+            self.world_current_phase = "failed"
+
+        if event_type in {
+            "intent_created",
+            "intent_resolved",
+            "intent_deferred",
+            "event_started",
+            "event_queued",
+            "event_completed",
+            "provider_waiting",
+            "provider_recovered",
+            "tick_blocked",
+        }:
+            self.world_recent_events.insert(0, normalized)
+            if len(self.world_recent_events) > self.max_world_recent_events:
+                self.world_recent_events = self.world_recent_events[:self.max_world_recent_events]
+
+        event_id = normalized.get("event_id")
+        if event_id:
+            if event_type == "intent_resolved" and normalized.get("resolution_status") == "queued":
+                queued_event = normalized.get("event") or normalized
+                self._upsert_world_event(self.world_queued_events, queued_event)
+            elif event_type == "event_queued":
+                self._upsert_world_event(self.world_queued_events, normalized)
+            elif event_type == "event_started":
+                self._remove_world_event(self.world_queued_events, event_id)
+                self._upsert_world_event(self.world_active_events, normalized)
+            elif event_type == "event_completed":
+                self._remove_world_event(self.world_active_events, event_id)
+                self._remove_world_event(self.world_queued_events, event_id)
+                self.world_completed_events_count += 1
+
+        self.updated_at = datetime.now().isoformat()
+
+    def _normalize_world_event(self, event: Dict[str, Any], event_type: str) -> Dict[str, Any]:
+        action_args = event.get("action_args") or {}
+        embedded_event = action_args.get("event") if isinstance(action_args.get("event"), dict) else {}
+        payload = embedded_event if embedded_event else action_args
+        return {
+            "event_type": event_type,
+            "timestamp": event.get("timestamp"),
+            "round": event.get("round") or event.get("tick") or payload.get("tick"),
+            "tick": event.get("round") or event.get("tick") or payload.get("tick"),
+            "phase": event.get("phase"),
+            "agent_id": event.get("agent_id"),
+            "agent_name": event.get("agent_name"),
+            "action_type": event.get("action_type"),
+            "intent_id": action_args.get("intent_id"),
+            "objective": action_args.get("objective"),
+            "resolution_status": action_args.get("resolution_status"),
+            "reason": action_args.get("reason") or event.get("reason"),
+            "event_id": payload.get("event_id"),
+            "title": payload.get("title"),
+            "summary": payload.get("summary") or action_args.get("summary") or event.get("summary") or event.get("result"),
+            "priority": payload.get("priority"),
+            "duration_ticks": payload.get("duration_ticks"),
+            "resolves_at_tick": payload.get("resolves_at_tick"),
+            "participants": payload.get("participants") or action_args.get("participants") or [],
+            "location": payload.get("location") or action_args.get("location"),
+            "resource": payload.get("resource") or action_args.get("resource"),
+            "target": payload.get("target") or action_args.get("target"),
+            "status": payload.get("status") or action_args.get("status"),
+            "state_impacts": payload.get("state_impacts") or action_args.get("state_impacts") or {},
+            "provider_role": event.get("provider_role"),
+            "wait_seconds": event.get("wait_seconds"),
+            "context": event.get("context"),
+            "event": embedded_event or None,
+        }
+
+    def update_world_snapshot(self, snapshot: Dict[str, Any]):
+        self.latest_snapshot = snapshot
+        if "active_events" in snapshot:
+            self.world_active_events = list(snapshot.get("active_events") or [])
+        if "queued_events" in snapshot:
+            self.world_queued_events = list(snapshot.get("queued_events") or [])
+        self.world_current_phase = snapshot.get("phase", self.world_current_phase)
+        counts = snapshot.get("counts") or snapshot.get("metrics") or {}
+        self.world_completed_events_count = counts.get(
+            "completed_events_count",
+            self.world_completed_events_count,
+        )
+        lifecycle_counters = counts.get("lifecycle_counters") or {}
+        if lifecycle_counters:
+            for key, value in lifecycle_counters.items():
+                self.world_phase_counts[str(key).strip().lower()] = int(value)
+        self.current_round = max(
+            self.current_round,
+            snapshot.get("round", 0) or snapshot.get("tick", 0),
+        )
+        self.simulated_hours = snapshot.get("simulated_hours", self.simulated_hours)
+        self.updated_at = datetime.now().isoformat()
+
+    def _upsert_world_event(self, container: List[Dict[str, Any]], event: Dict[str, Any]):
+        event_id = event.get("event_id")
+        if not event_id:
+            return
+
+        simplified = {
+            "event_id": event_id,
+            "tick": event.get("tick") or event.get("round"),
+            "title": event.get("title"),
+            "summary": event.get("summary"),
+            "action_type": event.get("action_type"),
+            "priority": event.get("priority"),
+            "duration_ticks": event.get("duration_ticks"),
+            "remaining_ticks": event.get("remaining_ticks"),
+            "resolves_at_tick": event.get("resolves_at_tick"),
+            "participants": event.get("participants") or [],
+            "location": event.get("location"),
+            "resource": event.get("resource"),
+            "target": event.get("target"),
+            "status": event.get("status"),
+        }
+
+        for idx, item in enumerate(container):
+            if item.get("event_id") == event_id:
+                container[idx] = simplified
+                return
+
+        container.insert(0, simplified)
+
+    def _remove_world_event(self, container: List[Dict[str, Any]], event_id: str):
+        container[:] = [item for item in container if item.get("event_id") != event_id]
     
     def to_dict(self) -> Dict[str, Any]:
         return {
             "simulation_id": self.simulation_id,
+            "simulation_mode": self.simulation_mode,
             "runner_status": self.runner_status.value,
             "current_round": self.current_round,
             "total_rounds": self.total_rounds,
@@ -172,11 +335,26 @@ class SimulationRunState:
             "reddit_simulated_hours": self.reddit_simulated_hours,
             "twitter_running": self.twitter_running,
             "reddit_running": self.reddit_running,
+            "world_running": self.world_running,
             "twitter_completed": self.twitter_completed,
             "reddit_completed": self.reddit_completed,
+            "world_completed": self.world_completed,
             "twitter_actions_count": self.twitter_actions_count,
             "reddit_actions_count": self.reddit_actions_count,
-            "total_actions_count": self.twitter_actions_count + self.reddit_actions_count,
+            "world_actions_count": self.world_actions_count,
+            "total_actions_count": self.twitter_actions_count + self.reddit_actions_count + self.world_actions_count,
+            "world_active_events_count": len(self.world_active_events),
+            "world_queued_events_count": len(self.world_queued_events),
+            "world_completed_events_count": self.world_completed_events_count,
+            "world_current_phase": self.world_current_phase,
+            "world_phase_counts": self.world_phase_counts,
+            "world_intents_created_count": self.world_phase_counts.get("intent_created", 0),
+            "world_resolved_intents_count": self.world_phase_counts.get("intent_resolved", 0),
+            "world_events_started_count": self.world_phase_counts.get("event_started", 0),
+            "world_events_completed_count": self.world_phase_counts.get("event_completed", self.world_completed_events_count),
+            "world_provider_waits_count": self.world_phase_counts.get("provider_waiting", 0),
+            "world_ticks_blocked_count": self.world_phase_counts.get("tick_blocked", 0),
+            "world_intents_deferred_count": self.world_phase_counts.get("intent_deferred", 0),
             "started_at": self.started_at,
             "updated_at": self.updated_at,
             "completed_at": self.completed_at,
@@ -188,6 +366,10 @@ class SimulationRunState:
         """包含最近动作的详细信息"""
         result = self.to_dict()
         result["recent_actions"] = [a.to_dict() for a in self.recent_actions]
+        result["world_recent_events"] = self.world_recent_events
+        result["world_active_events"] = self.world_active_events
+        result["world_queued_events"] = self.world_queued_events
+        result["latest_snapshot"] = self.latest_snapshot
         result["rounds_count"] = len(self.rounds)
         return result
 
@@ -251,6 +433,7 @@ class SimulationRunner:
             
             state = SimulationRunState(
                 simulation_id=simulation_id,
+                simulation_mode=SimulationMode.normalize(data.get("simulation_mode")).value,
                 runner_status=RunnerStatus(data.get("runner_status", "idle")),
                 current_round=data.get("current_round", 0),
                 total_rounds=data.get("total_rounds", 0),
@@ -263,15 +446,25 @@ class SimulationRunner:
                 reddit_simulated_hours=data.get("reddit_simulated_hours", 0),
                 twitter_running=data.get("twitter_running", False),
                 reddit_running=data.get("reddit_running", False),
+                world_running=data.get("world_running", False),
                 twitter_completed=data.get("twitter_completed", False),
                 reddit_completed=data.get("reddit_completed", False),
+                world_completed=data.get("world_completed", False),
                 twitter_actions_count=data.get("twitter_actions_count", 0),
                 reddit_actions_count=data.get("reddit_actions_count", 0),
+                world_actions_count=data.get("world_actions_count", 0),
                 started_at=data.get("started_at"),
                 updated_at=data.get("updated_at", datetime.now().isoformat()),
                 completed_at=data.get("completed_at"),
                 error=data.get("error"),
                 process_pid=data.get("process_pid"),
+                world_recent_events=data.get("world_recent_events", []),
+                world_active_events=data.get("world_active_events", []),
+                world_queued_events=data.get("world_queued_events", []),
+                world_phase_counts=data.get("world_phase_counts", {}),
+                world_completed_events_count=data.get("world_completed_events_count", 0),
+                world_current_phase=data.get("world_current_phase", "idle"),
+                latest_snapshot=data.get("latest_snapshot"),
             )
             
             # 加载最近动作
@@ -307,6 +500,142 @@ class SimulationRunner:
             json.dump(data, f, ensure_ascii=False, indent=2)
         
         cls._run_states[state.simulation_id] = state
+
+    @classmethod
+    def _resolve_total_rounds(
+        cls,
+        config: Dict[str, Any],
+        max_rounds: Optional[int] = None,
+        allow_world_extension: bool = False,
+    ) -> tuple[int, int, int]:
+        simulation_mode = SimulationMode.normalize(config.get("simulation_mode")).value
+        time_config = config.get("time_config", {})
+
+        if simulation_mode == SimulationMode.WORLD.value:
+            total_rounds = int(time_config.get("total_ticks", time_config.get("total_rounds", 12)))
+            total_hours = int(time_config.get("total_simulation_hours", total_rounds))
+            minutes_per_round = int(time_config.get("minutes_per_round", 60))
+        else:
+            total_hours = int(time_config.get("total_simulation_hours", 72))
+            minutes_per_round = int(time_config.get("minutes_per_round", 30))
+            total_rounds = int(total_hours * 60 / minutes_per_round)
+
+        if max_rounds is not None and max_rounds > 0:
+            if simulation_mode == SimulationMode.WORLD.value and allow_world_extension:
+                total_rounds = max_rounds
+                total_hours = max(total_hours, math.ceil(total_rounds * minutes_per_round / 60))
+            else:
+                total_rounds = min(total_rounds, max_rounds)
+
+        return total_rounds, total_hours, minutes_per_round
+
+    @classmethod
+    def _world_checkpoint_path(cls, simulation_id: str) -> str:
+        return os.path.join(cls.RUN_STATE_DIR, simulation_id, "world", "checkpoint.json")
+
+    @classmethod
+    def get_world_checkpoint(cls, simulation_id: str) -> Optional[Dict[str, Any]]:
+        checkpoint_path = cls._world_checkpoint_path(simulation_id)
+        if not os.path.exists(checkpoint_path):
+            return None
+
+        try:
+            with open(checkpoint_path, 'r', encoding='utf-8') as f:
+                payload = json.load(f)
+        except Exception as e:
+            logger.warning(f"读取 world checkpoint 失败: {simulation_id}, error={e}")
+            return None
+
+        return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def get_world_checkpoint_meta(cls, simulation_id: str) -> Optional[Dict[str, Any]]:
+        payload = cls.get_world_checkpoint(simulation_id)
+        if not payload:
+            return None
+
+        last_snapshot = payload.get("last_snapshot") or {}
+        active_events = payload.get("active_events") or []
+        queued_events = payload.get("queued_events") or []
+        completed_events = payload.get("completed_events") or []
+
+        try:
+            last_completed_tick = int(payload.get("last_completed_tick", 0) or 0)
+        except (TypeError, ValueError):
+            last_completed_tick = 0
+
+        try:
+            run_total_rounds = int(payload.get("run_total_rounds", 0) or 0)
+        except (TypeError, ValueError):
+            run_total_rounds = 0
+
+        try:
+            minutes_per_round = int(payload.get("minutes_per_round", 60) or 60)
+        except (TypeError, ValueError):
+            minutes_per_round = 60
+
+        simulated_hours = last_snapshot.get("simulated_hours")
+        if simulated_hours is None:
+            simulated_hours = round(last_completed_tick * minutes_per_round / 60, 2)
+
+        return {
+            "checkpoint_available": True,
+            "checkpoint_path": cls._world_checkpoint_path(simulation_id),
+            "saved_at": payload.get("saved_at"),
+            "status": payload.get("status") or "running",
+            "last_completed_tick": last_completed_tick,
+            "run_total_rounds": run_total_rounds,
+            "minutes_per_round": minutes_per_round,
+            "simulated_hours": simulated_hours,
+            "last_snapshot": last_snapshot if isinstance(last_snapshot, dict) else {},
+            "active_events": active_events if isinstance(active_events, list) else [],
+            "queued_events": queued_events if isinstance(queued_events, list) else [],
+            "completed_events_count": len(completed_events) if isinstance(completed_events, list) else 0,
+        }
+
+    @classmethod
+    def _world_lease_status(
+        cls,
+        simulation_id: str,
+        config_path: str,
+    ) -> Dict[str, Any]:
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        paths = world_run_paths_for_simulation_dir(sim_dir)
+        status = inspect_world_run_lease(paths, expected_config_path=config_path)
+        if status.get("pid") and not status.get("alive"):
+            cleanup_world_run_lease(paths)
+            status = inspect_world_run_lease(paths, expected_config_path=config_path)
+        return status
+
+    @classmethod
+    def _ensure_world_not_running(
+        cls,
+        simulation_id: str,
+        config_path: str,
+    ) -> None:
+        lease_status = cls._world_lease_status(simulation_id, config_path)
+        if lease_status.get("matches_expected_run"):
+            raise ValueError(
+                f"world 模拟已在运行中: {simulation_id}, pid={lease_status.get('pid')}"
+            )
+
+        existing = cls.get_run_state(simulation_id)
+        if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
+            if cls._has_live_process(simulation_id):
+                raise ValueError(f"模拟已在运行中: {simulation_id}")
+            existing.runner_status = RunnerStatus.STOPPED
+            existing.world_running = False
+            existing.updated_at = datetime.now().isoformat()
+            cls._save_run_state(existing)
+
+    @classmethod
+    def _has_live_process(cls, simulation_id: str) -> bool:
+        process = cls._processes.get(simulation_id)
+        return bool(process and process.poll() is None)
+
+    @classmethod
+    def has_live_process(cls, simulation_id: str) -> bool:
+        return cls._has_live_process(simulation_id)
     
     @classmethod
     def start_simulation(
@@ -315,7 +644,9 @@ class SimulationRunner:
         platform: str = "parallel",  # twitter / reddit / parallel
         max_rounds: int = None,  # 最大模拟轮数（可选，用于截断过长的模拟）
         enable_graph_memory_update: bool = False,  # 是否将活动更新到Zep图谱
-        graph_id: str = None  # Zep图谱ID（启用图谱更新时必需）
+        graph_id: str = None,  # Zep图谱ID（启用图谱更新时必需）
+        resume_from_checkpoint: bool = False,
+        checkpoint_meta: Optional[Dict[str, Any]] = None,
     ) -> SimulationRunState:
         """
         启动模拟
@@ -326,15 +657,12 @@ class SimulationRunner:
             max_rounds: 最大模拟轮数（可选，用于截断过长的模拟）
             enable_graph_memory_update: 是否将Agent活动动态更新到Zep图谱
             graph_id: Zep图谱ID（启用图谱更新时必需）
+            resume_from_checkpoint: world 模式下是否从 checkpoint 续跑
+            checkpoint_meta: 已加载的 checkpoint 元信息（可选）
             
         Returns:
             SimulationRunState
         """
-        # 检查是否已在运行
-        existing = cls.get_run_state(simulation_id)
-        if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
-            raise ValueError(f"模拟已在运行中: {simulation_id}")
-        
         # 加载模拟配置
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         config_path = os.path.join(sim_dir, "simulation_config.json")
@@ -344,32 +672,50 @@ class SimulationRunner:
         
         with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
+        simulation_mode = SimulationMode.normalize(config.get("simulation_mode")).value
+        if simulation_mode == SimulationMode.WORLD.value:
+            cls._ensure_world_not_running(simulation_id, config_path)
+        else:
+            existing = cls.get_run_state(simulation_id)
+            if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
+                raise ValueError(f"模拟已在运行中: {simulation_id}")
         
         # 初始化运行状态
-        time_config = config.get("time_config", {})
-        total_hours = time_config.get("total_simulation_hours", 72)
-        minutes_per_round = time_config.get("minutes_per_round", 30)
-        total_rounds = int(total_hours * 60 / minutes_per_round)
-        
-        # 如果指定了最大轮数，则截断
-        if max_rounds is not None and max_rounds > 0:
-            original_rounds = total_rounds
-            total_rounds = min(total_rounds, max_rounds)
-            if total_rounds < original_rounds:
-                logger.info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
+        base_total_rounds, total_hours, minutes_per_round = cls._resolve_total_rounds(config)
+        total_rounds, _, _ = cls._resolve_total_rounds(
+            config,
+            max_rounds=max_rounds,
+            allow_world_extension=(
+                resume_from_checkpoint and simulation_mode == SimulationMode.WORLD.value
+            ),
+        )
+        if max_rounds is not None and max_rounds > 0 and total_rounds < base_total_rounds:
+            logger.info(f"轮数已截断: {base_total_rounds} -> {total_rounds} (max_rounds={max_rounds})")
         
         state = SimulationRunState(
             simulation_id=simulation_id,
+            simulation_mode=simulation_mode,
             runner_status=RunnerStatus.STARTING,
             total_rounds=total_rounds,
             total_simulation_hours=total_hours,
             started_at=datetime.now().isoformat(),
         )
+
+        if resume_from_checkpoint and simulation_mode == SimulationMode.WORLD.value:
+            checkpoint_meta = checkpoint_meta or cls.get_world_checkpoint_meta(simulation_id)
+            if checkpoint_meta:
+                state.current_round = int(checkpoint_meta.get("last_completed_tick", 0) or 0)
+                state.simulated_hours = checkpoint_meta.get("simulated_hours", 0) or 0
+                state.latest_snapshot = checkpoint_meta.get("last_snapshot") or None
+                state.world_active_events = checkpoint_meta.get("active_events") or []
+                state.world_queued_events = checkpoint_meta.get("queued_events") or []
+                state.world_completed_events_count = int(checkpoint_meta.get("completed_events_count", 0) or 0)
+                state.world_current_phase = "resuming"
         
         cls._save_run_state(state)
         
         # 如果启用图谱记忆更新，创建更新器
-        if enable_graph_memory_update:
+        if enable_graph_memory_update and simulation_mode != SimulationMode.WORLD.value:
             if not graph_id:
                 raise ValueError("启用图谱记忆更新时必须提供 graph_id")
             
@@ -384,7 +730,10 @@ class SimulationRunner:
             cls._graph_memory_enabled[simulation_id] = False
         
         # 确定运行哪个脚本（脚本位于 backend/scripts/ 目录）
-        if platform == "twitter":
+        if simulation_mode == SimulationMode.WORLD.value:
+            script_name = "run_world_simulation.py"
+            state.world_running = True
+        elif platform == "twitter":
             script_name = "run_twitter_simulation.py"
             state.twitter_running = True
         elif platform == "reddit":
@@ -421,10 +770,13 @@ class SimulationRunner:
             # 如果指定了最大轮数，添加到命令行参数
             if max_rounds is not None and max_rounds > 0:
                 cmd.extend(["--max-rounds", str(max_rounds)])
+            if resume_from_checkpoint:
+                cmd.append("--resume-from-checkpoint")
             
             # 创建主日志文件，避免 stdout/stderr 管道缓冲区满导致进程阻塞
             main_log_path = os.path.join(sim_dir, "simulation.log")
-            main_log_file = open(main_log_path, 'w', encoding='utf-8')
+            log_mode = 'a' if resume_from_checkpoint else 'w'
+            main_log_file = open(main_log_path, log_mode, encoding='utf-8')
             
             # 设置子进程环境变量，确保 Windows 上使用 UTF-8 编码
             # 这可以修复第三方库（如 OASIS）读取文件时未指定编码的问题
@@ -488,6 +840,10 @@ class SimulationRunner:
         
         if not process or not state:
             return
+
+        if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+            cls._monitor_world_simulation(simulation_id, process, state, sim_dir)
+            return
         
         twitter_position = 0
         reddit_position = 0
@@ -519,7 +875,11 @@ class SimulationRunner:
             # 进程结束
             exit_code = process.returncode
             
-            if exit_code == 0:
+            if state.runner_status in {RunnerStatus.STOPPING, RunnerStatus.STOPPED}:
+                state.runner_status = RunnerStatus.STOPPED
+                state.completed_at = state.completed_at or datetime.now().isoformat()
+                logger.info(f"模拟已停止: {simulation_id}")
+            elif exit_code == 0:
                 state.runner_status = RunnerStatus.COMPLETED
                 state.completed_at = datetime.now().isoformat()
                 logger.info(f"模拟完成: {simulation_id}")
@@ -574,6 +934,94 @@ class SimulationRunner:
                 except Exception:
                     pass
                 cls._stderr_files.pop(simulation_id, None)
+
+    @classmethod
+    def _monitor_world_simulation(
+        cls,
+        simulation_id: str,
+        process: subprocess.Popen,
+        state: SimulationRunState,
+        sim_dir: str,
+    ) -> None:
+        actions_log = os.path.join(sim_dir, "world", "actions.jsonl")
+        snapshots_log = os.path.join(sim_dir, "world", "state_snapshots.jsonl")
+        position = 0
+        snapshot_position = 0
+
+        try:
+            while process.poll() is None:
+                if os.path.exists(actions_log):
+                    position = cls._read_action_log(actions_log, position, state, "world")
+                if os.path.exists(snapshots_log):
+                    snapshot_position = cls._read_world_snapshot_log(
+                        snapshots_log,
+                        snapshot_position,
+                        state,
+                    )
+                cls._save_run_state(state)
+                time.sleep(1)
+
+            if os.path.exists(actions_log):
+                cls._read_action_log(actions_log, position, state, "world")
+            if os.path.exists(snapshots_log):
+                cls._read_world_snapshot_log(snapshots_log, snapshot_position, state)
+
+            if state.runner_status in {RunnerStatus.STOPPING, RunnerStatus.STOPPED}:
+                state.runner_status = RunnerStatus.STOPPED
+                state.completed_at = state.completed_at or datetime.now().isoformat()
+            elif process.returncode == 0:
+                state.runner_status = RunnerStatus.COMPLETED
+                state.completed_at = datetime.now().isoformat()
+            else:
+                state.runner_status = RunnerStatus.FAILED
+                state.error = f"进程退出码: {process.returncode}"
+            state.world_running = False
+            cls._save_run_state(state)
+        except Exception as e:
+            logger.error(f"world 监控线程异常: {simulation_id}, error={e}")
+            state.runner_status = RunnerStatus.FAILED
+            state.world_running = False
+            state.error = str(e)
+            cls._save_run_state(state)
+        finally:
+            cls._processes.pop(simulation_id, None)
+            cls._action_queues.pop(simulation_id, None)
+            if simulation_id in cls._stdout_files:
+                try:
+                    cls._stdout_files[simulation_id].close()
+                except Exception:
+                    pass
+                cls._stdout_files.pop(simulation_id, None)
+            if simulation_id in cls._stderr_files and cls._stderr_files[simulation_id]:
+                try:
+                    cls._stderr_files[simulation_id].close()
+                except Exception:
+                    pass
+                cls._stderr_files.pop(simulation_id, None)
+
+    @classmethod
+    def _read_world_snapshot_log(
+        cls,
+        log_path: str,
+        position: int,
+        state: SimulationRunState,
+    ) -> int:
+        try:
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                f.seek(position)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        snapshot = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    state.update_world_snapshot(snapshot)
+                return f.tell()
+        except Exception as e:
+            logger.warning(f"读取 world snapshot 日志失败: {log_path}, error={e}")
+            return position
     
     @classmethod
     def _read_action_log(
@@ -612,49 +1060,7 @@ class SimulationRunner:
                             
                             # 处理事件类型的条目
                             if "event_type" in action_data:
-                                event_type = action_data.get("event_type")
-                                
-                                # 检测 simulation_end 事件，标记平台已完成
-                                if event_type == "simulation_end":
-                                    if platform == "twitter":
-                                        state.twitter_completed = True
-                                        state.twitter_running = False
-                                        logger.info(f"Twitter 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}")
-                                    elif platform == "reddit":
-                                        state.reddit_completed = True
-                                        state.reddit_running = False
-                                        logger.info(f"Reddit 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}")
-                                    
-                                    # 检查是否所有启用的平台都已完成
-                                    # 如果只运行了一个平台，只检查那个平台
-                                    # 如果运行了两个平台，需要两个都完成
-                                    all_completed = cls._check_all_platforms_completed(state)
-                                    if all_completed:
-                                        state.runner_status = RunnerStatus.COMPLETED
-                                        state.completed_at = datetime.now().isoformat()
-                                        logger.info(f"所有平台模拟已完成: {state.simulation_id}")
-                                
-                                # 更新轮次信息（从 round_end 事件）
-                                elif event_type == "round_end":
-                                    round_num = action_data.get("round", 0)
-                                    simulated_hours = action_data.get("simulated_hours", 0)
-                                    
-                                    # 更新各平台独立的轮次和时间
-                                    if platform == "twitter":
-                                        if round_num > state.twitter_current_round:
-                                            state.twitter_current_round = round_num
-                                        state.twitter_simulated_hours = simulated_hours
-                                    elif platform == "reddit":
-                                        if round_num > state.reddit_current_round:
-                                            state.reddit_current_round = round_num
-                                        state.reddit_simulated_hours = simulated_hours
-                                    
-                                    # 总体轮次取两个平台的最大值
-                                    if round_num > state.current_round:
-                                        state.current_round = round_num
-                                    # 总体时间取两个平台的最大值
-                                    state.simulated_hours = max(state.twitter_simulated_hours, state.reddit_simulated_hours)
-                                
+                                cls._handle_event_log_entry(state, platform, action_data)
                                 continue
                             
                             action = AgentAction(
@@ -669,6 +1075,9 @@ class SimulationRunner:
                                 success=action_data.get("success", True),
                             )
                             state.add_action(action)
+
+                            if platform == "world":
+                                cls._handle_world_action_entry(state, action_data)
                             
                             # 更新轮次
                             if action.round_num and action.round_num > state.current_round:
@@ -684,6 +1093,86 @@ class SimulationRunner:
         except Exception as e:
             logger.warning(f"读取动作日志失败: {log_path}, error={e}")
             return position
+
+    @classmethod
+    def _handle_event_log_entry(
+        cls,
+        state: SimulationRunState,
+        platform: str,
+        action_data: Dict[str, Any],
+    ) -> None:
+        event_type = action_data.get("event_type")
+
+        if event_type == "simulation_end":
+            if platform == "twitter":
+                state.twitter_completed = True
+                state.twitter_running = False
+                logger.info(
+                    f"Twitter 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}"
+                )
+            elif platform == "reddit":
+                state.reddit_completed = True
+                state.reddit_running = False
+                logger.info(
+                    f"Reddit 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}"
+                )
+            elif platform == "world":
+                state.world_completed = True
+                state.world_running = False
+                logger.info(
+                    f"World 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}"
+                )
+
+            if cls._check_all_platforms_completed(state):
+                state.runner_status = RunnerStatus.COMPLETED
+                state.completed_at = datetime.now().isoformat()
+                logger.info(f"所有平台模拟已完成: {state.simulation_id}")
+            return
+        if event_type == "simulation_failed":
+            if platform == "world":
+                state.world_running = False
+                state.runner_status = RunnerStatus.FAILED
+                state.error = action_data.get("error") or action_data.get("summary") or "world simulation failed"
+            return
+
+        round_num = action_data.get("round") or action_data.get("tick", 0)
+        simulated_hours = action_data.get("simulated_hours", 0)
+
+        if event_type in {"round_end", "tick_end"}:
+            if platform == "twitter":
+                if round_num > state.twitter_current_round:
+                    state.twitter_current_round = round_num
+                state.twitter_simulated_hours = simulated_hours
+            elif platform == "reddit":
+                if round_num > state.reddit_current_round:
+                    state.reddit_current_round = round_num
+                state.reddit_simulated_hours = simulated_hours
+            elif platform == "world":
+                state.world_running = True
+                if round_num > state.current_round:
+                    state.current_round = round_num
+                state.simulated_hours = simulated_hours
+
+            if round_num > state.current_round:
+                state.current_round = round_num
+            if platform != "world":
+                state.simulated_hours = max(state.twitter_simulated_hours, state.reddit_simulated_hours)
+
+        if platform == "world":
+            if event_type in {"tick_start", "tick_end", "round_start", "round_end"} and round_num > state.current_round:
+                state.current_round = round_num
+            state.world_running = event_type not in {"simulation_end"}
+            state.add_world_event(action_data)
+
+    @classmethod
+    def _handle_world_action_entry(
+        cls,
+        state: SimulationRunState,
+        action_data: Dict[str, Any],
+    ) -> None:
+        action_type = str(action_data.get("action_type") or "").strip()
+        if action_type:
+            state.add_world_event(action_data)
     
     @classmethod
     def _check_all_platforms_completed(cls, state: SimulationRunState) -> bool:
@@ -698,6 +1187,10 @@ class SimulationRunner:
         sim_dir = os.path.join(cls.RUN_STATE_DIR, state.simulation_id)
         twitter_log = os.path.join(sim_dir, "twitter", "actions.jsonl")
         reddit_log = os.path.join(sim_dir, "reddit", "actions.jsonl")
+        world_log = os.path.join(sim_dir, "world", "actions.jsonl")
+
+        if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+            return os.path.exists(world_log) and state.world_completed
         
         # 检查哪些平台被启用（通过文件是否存在判断）
         twitter_enabled = os.path.exists(twitter_log)
@@ -767,7 +1260,133 @@ class SimulationRunner:
                 logger.warning(f"进程组未响应 SIGTERM，强制终止: {simulation_id}")
                 os.killpg(pgid, signal.SIGKILL)
                 process.wait(timeout=5)
-    
+
+    @classmethod
+    def _signal_process_group(
+        cls,
+        process: subprocess.Popen,
+        simulation_id: str,
+        sig: int,
+    ) -> None:
+        """向模拟进程组发送控制信号。"""
+        if process.poll() is not None:
+            raise ValueError(f"模拟进程已退出: {simulation_id}")
+
+        if IS_WINDOWS:
+            raise NotImplementedError("当前仅支持在 Unix 系统上暂停/恢复模拟进程")
+
+        pgid = os.getpgid(process.pid)
+        logger.info(f"发送进程组信号: simulation={simulation_id}, pgid={pgid}, signal={sig}")
+        os.killpg(pgid, sig)
+
+    @classmethod
+    def pause_simulation(cls, simulation_id: str) -> SimulationRunState:
+        """暂停模拟进程，但保留当前运行上下文。"""
+        state = cls.get_run_state(simulation_id)
+        if not state:
+            raise ValueError(f"模拟不存在: {simulation_id}")
+
+        if state.runner_status != RunnerStatus.RUNNING:
+            raise ValueError(f"模拟当前不可暂停: {simulation_id}, status={state.runner_status}")
+
+        process = cls._processes.get(simulation_id)
+        if not process:
+            raise ValueError(f"模拟进程不可用，无法暂停: {simulation_id}")
+
+        try:
+            cls._signal_process_group(process, simulation_id, signal.SIGSTOP)
+        except ProcessLookupError as e:
+            raise ValueError(f"模拟进程不存在，无法暂停: {simulation_id}") from e
+
+        state.runner_status = RunnerStatus.PAUSED
+        if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+            state.world_current_phase = "paused"
+        state.updated_at = datetime.now().isoformat()
+        cls._save_run_state(state)
+
+        logger.info(f"模拟已暂停: {simulation_id}")
+        return state
+
+    @classmethod
+    def resume_simulation(cls, simulation_id: str) -> SimulationRunState:
+        """恢复已暂停的模拟进程。"""
+        state = cls.get_run_state(simulation_id)
+        if not state:
+            raise ValueError(f"模拟不存在: {simulation_id}")
+
+        if state.runner_status != RunnerStatus.PAUSED:
+            raise ValueError(f"模拟当前不可恢复: {simulation_id}, status={state.runner_status}")
+
+        process = cls._processes.get(simulation_id)
+        if not process:
+            raise ValueError(f"模拟进程不可用，无法恢复: {simulation_id}")
+
+        try:
+            cls._signal_process_group(process, simulation_id, signal.SIGCONT)
+        except ProcessLookupError as e:
+            raise ValueError(f"模拟进程不存在，无法恢复: {simulation_id}") from e
+
+        state.runner_status = RunnerStatus.RUNNING
+        if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+            restored_phase = "running"
+            if isinstance(state.latest_snapshot, dict):
+                restored_phase = state.latest_snapshot.get("phase") or restored_phase
+            state.world_current_phase = restored_phase
+        state.updated_at = datetime.now().isoformat()
+        cls._save_run_state(state)
+
+        logger.info(f"模拟已恢复: {simulation_id}")
+        return state
+
+    @classmethod
+    def resume_world_from_checkpoint(
+        cls,
+        simulation_id: str,
+        max_rounds: Optional[int] = None,
+    ) -> SimulationRunState:
+        checkpoint_meta = cls.get_world_checkpoint_meta(simulation_id)
+        if not checkpoint_meta:
+            raise ValueError(f"world checkpoint 不存在，无法续跑: {simulation_id}")
+
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        config_path = os.path.join(sim_dir, "simulation_config.json")
+        if not os.path.exists(config_path):
+            raise ValueError(f"模拟配置不存在，请先调用 /prepare 接口")
+
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        simulation_mode = SimulationMode.normalize(config.get("simulation_mode")).value
+        if simulation_mode != SimulationMode.WORLD.value:
+            raise ValueError("只有 world 模式支持 checkpoint 续跑")
+        cls._ensure_world_not_running(simulation_id, config_path)
+
+        resume_round_cap = max_rounds
+        if resume_round_cap is None:
+            checkpoint_round_cap = checkpoint_meta.get("run_total_rounds")
+            if checkpoint_round_cap:
+                resume_round_cap = int(checkpoint_round_cap)
+
+        total_rounds, _, _ = cls._resolve_total_rounds(
+            config,
+            max_rounds=resume_round_cap,
+            allow_world_extension=True,
+        )
+        if checkpoint_meta["last_completed_tick"] >= total_rounds:
+            raise ValueError(
+                f"checkpoint 已经跑到末尾: tick={checkpoint_meta['last_completed_tick']}, total_rounds={total_rounds}"
+            )
+
+        return cls.start_simulation(
+            simulation_id=simulation_id,
+            platform="world",
+            max_rounds=resume_round_cap,
+            enable_graph_memory_update=False,
+            graph_id=None,
+            resume_from_checkpoint=True,
+            checkpoint_meta=checkpoint_meta,
+        )
+
     @classmethod
     def stop_simulation(cls, simulation_id: str) -> SimulationRunState:
         """停止模拟"""
@@ -801,6 +1420,9 @@ class SimulationRunner:
         state.runner_status = RunnerStatus.STOPPED
         state.twitter_running = False
         state.reddit_running = False
+        state.world_running = False
+        if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+            state.world_current_phase = "stopped"
         state.completed_at = datetime.now().isoformat()
         cls._save_run_state(state)
         
@@ -898,7 +1520,7 @@ class SimulationRunner:
         
         Args:
             simulation_id: 模拟ID
-            platform: 过滤平台（twitter/reddit）
+            platform: 过滤平台（twitter/reddit/world）
             agent_id: 过滤Agent
             round_num: 过滤轮次
             
@@ -929,6 +1551,18 @@ class SimulationRunner:
                 agent_id=agent_id,
                 round_num=round_num
             ))
+
+        world_actions_log = os.path.join(sim_dir, "world", "actions.jsonl")
+        if not platform or platform == "world":
+            actions.extend(
+                cls._read_actions_from_file(
+                    world_actions_log,
+                    default_platform="world",
+                    platform_filter=platform,
+                    agent_id=agent_id,
+                    round_num=round_num,
+                )
+            )
         
         # 如果分平台文件不存在，尝试读取旧的单一文件格式
         if not actions:
@@ -945,6 +1579,123 @@ class SimulationRunner:
         actions.sort(key=lambda x: x.timestamp, reverse=True)
         
         return actions
+
+    @classmethod
+    def get_world_events(
+        cls,
+        simulation_id: str,
+        event_types: Optional[List[str]] = None,
+        tick: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        world_actions_log = os.path.join(sim_dir, "world", "actions.jsonl")
+        if not os.path.exists(world_actions_log):
+            return []
+
+        normalized_filter = {event_type.lower() for event_type in (event_types or [])}
+        events: List[Dict[str, Any]] = []
+        with open(world_actions_log, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                normalized = cls._normalize_world_feed_entry(payload)
+                if not normalized.get("event_type"):
+                    continue
+                event_tick = normalized.get("tick") or normalized.get("round")
+
+                if normalized_filter and normalized["event_type"] not in normalized_filter:
+                    continue
+                if tick is not None and event_tick != tick:
+                    continue
+                events.append(normalized)
+
+        events.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
+        if limit is not None:
+            return events[:limit]
+        return events
+
+    @classmethod
+    def _normalize_world_feed_entry(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if "event_type" in payload:
+            normalized = dict(payload)
+            normalized["event_type"] = str(payload.get("event_type") or "").strip().lower()
+            normalized["tick"] = payload.get("tick") or payload.get("round")
+            normalized["round"] = payload.get("round") or payload.get("tick")
+            return normalized
+
+        action_type = str(payload.get("action_type") or "").strip().lower()
+        if not action_type:
+            return {}
+
+        action_args = payload.get("action_args") or {}
+        embedded_event = action_args.get("event") if isinstance(action_args.get("event"), dict) else {}
+        event_payload = embedded_event if embedded_event else action_args
+        return {
+            "event_type": action_type,
+            "timestamp": payload.get("timestamp"),
+            "tick": payload.get("round") or event_payload.get("tick"),
+            "round": payload.get("round") or event_payload.get("tick"),
+            "phase": payload.get("phase"),
+            "agent_id": payload.get("agent_id"),
+            "agent_name": payload.get("agent_name"),
+            "action_type": payload.get("action_type"),
+            "intent_id": action_args.get("intent_id"),
+            "objective": action_args.get("objective"),
+            "resolution_status": action_args.get("resolution_status"),
+            "reason": action_args.get("reason"),
+            "event_id": event_payload.get("event_id"),
+            "title": event_payload.get("title"),
+            "summary": event_payload.get("summary") or action_args.get("summary") or payload.get("result"),
+            "priority": event_payload.get("priority"),
+            "duration_ticks": event_payload.get("duration_ticks"),
+            "resolves_at_tick": event_payload.get("resolves_at_tick"),
+            "participants": event_payload.get("participants") or action_args.get("participants") or [],
+            "location": event_payload.get("location") or action_args.get("location"),
+            "resource": event_payload.get("resource") or action_args.get("resource"),
+            "target": event_payload.get("target") or action_args.get("target"),
+            "status": event_payload.get("status") or action_args.get("status"),
+            "state_impacts": event_payload.get("state_impacts") or action_args.get("state_impacts") or {},
+            "event": embedded_event or None,
+        }
+
+    @classmethod
+    def get_world_snapshots(
+        cls,
+        simulation_id: str,
+        tick: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        snapshots_log = os.path.join(sim_dir, "world", "state_snapshots.jsonl")
+        if not os.path.exists(snapshots_log):
+            return []
+
+        snapshots: List[Dict[str, Any]] = []
+        with open(snapshots_log, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    snapshot = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                snapshot_tick = snapshot.get("tick") or snapshot.get("round")
+                if tick is not None and snapshot_tick != tick:
+                    continue
+                snapshots.append(snapshot)
+
+        snapshots.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
+        if limit is not None:
+            return snapshots[:limit]
+        return snapshots
     
     @classmethod
     def get_actions(
@@ -998,6 +1749,14 @@ class SimulationRunner:
         Returns:
             每轮的汇总信息
         """
+        state = cls.get_run_state(simulation_id)
+        if state and SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+            return cls._get_world_timeline(
+                simulation_id=simulation_id,
+                start_round=start_round,
+                end_round=end_round,
+            )
+
         actions = cls.get_actions(simulation_id, limit=10000)
         
         # 按轮次分组
@@ -1016,6 +1775,7 @@ class SimulationRunner:
                     "round_num": round_num,
                     "twitter_actions": 0,
                     "reddit_actions": 0,
+                    "world_actions": 0,
                     "active_agents": set(),
                     "action_types": {},
                     "first_action_time": action.timestamp,
@@ -1026,8 +1786,10 @@ class SimulationRunner:
             
             if action.platform == "twitter":
                 r["twitter_actions"] += 1
-            else:
+            elif action.platform == "reddit":
                 r["reddit_actions"] += 1
+            else:
+                r["world_actions"] += 1
             
             r["active_agents"].add(action.agent_id)
             r["action_types"][action.action_type] = r["action_types"].get(action.action_type, 0) + 1
@@ -1041,7 +1803,8 @@ class SimulationRunner:
                 "round_num": round_num,
                 "twitter_actions": r["twitter_actions"],
                 "reddit_actions": r["reddit_actions"],
-                "total_actions": r["twitter_actions"] + r["reddit_actions"],
+                "world_actions": r["world_actions"],
+                "total_actions": r["twitter_actions"] + r["reddit_actions"] + r["world_actions"],
                 "active_agents_count": len(r["active_agents"]),
                 "active_agents": list(r["active_agents"]),
                 "action_types": r["action_types"],
@@ -1049,6 +1812,124 @@ class SimulationRunner:
                 "last_action_time": r["last_action_time"],
             })
         
+        return result
+
+    @classmethod
+    def _get_world_timeline(
+        cls,
+        simulation_id: str,
+        start_round: int = 0,
+        end_round: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        lifecycle_types = {
+            "intent_created",
+            "intent_resolved",
+            "intent_deferred",
+            "event_started",
+            "event_queued",
+            "event_completed",
+            "provider_waiting",
+            "tick_blocked",
+            "tick_start",
+            "tick_end",
+        }
+        events = cls.get_world_events(simulation_id, event_types=list(lifecycle_types))
+        snapshots = {
+            (snapshot.get("tick") or snapshot.get("round")): snapshot
+            for snapshot in cls.get_world_snapshots(simulation_id)
+        }
+
+        ticks: Dict[int, Dict[str, Any]] = {}
+        for event in events:
+            tick = event.get("tick") or event.get("round", 0)
+            if tick < start_round:
+                continue
+            if end_round is not None and tick > end_round:
+                continue
+
+            entry = ticks.setdefault(
+                tick,
+                {
+                    "tick": tick,
+                    "round_num": tick,
+                    "intent_created": 0,
+                    "intent_resolved": 0,
+                    "intent_deferred": 0,
+                    "events_started": 0,
+                    "events_queued": 0,
+                    "events_completed": 0,
+                    "provider_waiting": 0,
+                    "ticks_blocked": 0,
+                    "active_events_count": 0,
+                    "queued_events_count": 0,
+                    "current_phase": "idle",
+                    "summary": "",
+                    "world_state": None,
+                    "last_event_time": event.get("timestamp"),
+                },
+            )
+
+            event_type = event.get("event_type")
+            if event_type == "intent_created":
+                entry["intent_created"] += 1
+            elif event_type == "intent_resolved":
+                entry["intent_resolved"] += 1
+            elif event_type == "intent_deferred":
+                entry["intent_deferred"] += 1
+            elif event_type == "event_started":
+                entry["events_started"] += 1
+            elif event_type == "event_queued":
+                entry["events_queued"] += 1
+            elif event_type == "event_completed":
+                entry["events_completed"] += 1
+            elif event_type == "provider_waiting":
+                entry["provider_waiting"] += 1
+            elif event_type == "tick_blocked":
+                entry["ticks_blocked"] += 1
+            elif event_type in {"tick_start", "tick_end"}:
+                entry["current_phase"] = event.get("phase", entry["current_phase"])
+            if event_type == "tick_end":
+                entry["summary"] = event.get("summary", "")
+                if event.get("world_state") is not None:
+                    entry["world_state"] = event.get("world_state")
+                if event.get("active_events_count") is not None:
+                    entry["active_events_count"] = event.get("active_events_count", entry["active_events_count"])
+                if event.get("queued_events_count") is not None:
+                    entry["queued_events_count"] = event.get("queued_events_count", entry["queued_events_count"])
+
+            entry["last_event_time"] = event.get("timestamp")
+
+        for tick, snapshot in snapshots.items():
+            if tick not in ticks:
+                if tick < start_round:
+                    continue
+                if end_round is not None and tick > end_round:
+                    continue
+                ticks[tick] = {
+                    "tick": tick,
+                    "round_num": tick,
+                    "intent_created": 0,
+                    "intent_resolved": 0,
+                    "intent_deferred": 0,
+                    "events_started": 0,
+                    "events_queued": 0,
+                    "events_completed": 0,
+                    "provider_waiting": 0,
+                    "ticks_blocked": 0,
+                    "active_events_count": 0,
+                    "queued_events_count": 0,
+                    "current_phase": "idle",
+                    "summary": "",
+                    "world_state": None,
+                    "last_event_time": snapshot.get("timestamp"),
+                }
+            ticks[tick]["summary"] = snapshot.get("summary", ticks[tick]["summary"])
+            ticks[tick]["active_events_count"] = len(snapshot.get("active_events") or [])
+            ticks[tick]["queued_events_count"] = len(snapshot.get("queued_events") or [])
+            ticks[tick]["current_phase"] = snapshot.get("phase", ticks[tick]["current_phase"])
+            ticks[tick]["world_state"] = snapshot.get("world_state")
+
+        result = [ticks[tick] for tick in sorted(ticks.keys())]
         return result
     
     @classmethod
@@ -1073,6 +1954,7 @@ class SimulationRunner:
                     "total_actions": 0,
                     "twitter_actions": 0,
                     "reddit_actions": 0,
+                    "world_actions": 0,
                     "action_types": {},
                     "first_action_time": action.timestamp,
                     "last_action_time": action.timestamp,
@@ -1083,8 +1965,10 @@ class SimulationRunner:
             
             if action.platform == "twitter":
                 stats["twitter_actions"] += 1
-            else:
+            elif action.platform == "reddit":
                 stats["reddit_actions"] += 1
+            else:
+                stats["world_actions"] += 1
             
             stats["action_types"][action.action_type] = stats["action_types"].get(action.action_type, 0) + 1
             stats["last_action_time"] = action.timestamp
@@ -1103,6 +1987,8 @@ class SimulationRunner:
         - run_state.json
         - twitter/actions.jsonl
         - reddit/actions.jsonl
+        - world/actions.jsonl
+        - world/state_snapshots.jsonl
         - simulation.log
         - stdout.log / stderr.log
         - twitter_simulation.db（模拟数据库）
@@ -1139,7 +2025,7 @@ class SimulationRunner:
         ]
         
         # 要删除的目录列表（包含动作日志）
-        dirs_to_clean = ["twitter", "reddit"]
+        dirs_to_clean = ["twitter", "reddit", "world"]
         
         # 删除文件
         for filename in files_to_delete:
@@ -1162,6 +2048,28 @@ class SimulationRunner:
                         cleaned_files.append(f"{dir_name}/actions.jsonl")
                     except Exception as e:
                         errors.append(f"删除 {dir_name}/actions.jsonl 失败: {str(e)}")
+                if dir_name == "world":
+                    snapshots_file = os.path.join(dir_path, "state_snapshots.jsonl")
+                    if os.path.exists(snapshots_file):
+                        try:
+                            os.remove(snapshots_file)
+                            cleaned_files.append(f"{dir_name}/state_snapshots.jsonl")
+                        except Exception as e:
+                            errors.append(f"删除 {dir_name}/state_snapshots.jsonl 失败: {str(e)}")
+                    world_state_file = os.path.join(dir_path, "world_state.json")
+                    if os.path.exists(world_state_file):
+                        try:
+                            os.remove(world_state_file)
+                            cleaned_files.append(f"{dir_name}/world_state.json")
+                        except Exception as e:
+                            errors.append(f"删除 {dir_name}/world_state.json 失败: {str(e)}")
+                    checkpoint_file = os.path.join(dir_path, "checkpoint.json")
+                    if os.path.exists(checkpoint_file):
+                        try:
+                            os.remove(checkpoint_file)
+                            cleaned_files.append(f"{dir_name}/checkpoint.json")
+                        except Exception as e:
+                            errors.append(f"删除 {dir_name}/checkpoint.json 失败: {str(e)}")
         
         # 清理内存中的运行状态
         if simulation_id in cls._run_states:
@@ -1231,6 +2139,7 @@ class SimulationRunner:
                         state.runner_status = RunnerStatus.STOPPED
                         state.twitter_running = False
                         state.reddit_running = False
+                        state.world_running = False
                         state.completed_at = datetime.now().isoformat()
                         state.error = "服务器关闭，模拟被终止"
                         cls._save_run_state(state)
@@ -1362,6 +2271,18 @@ class SimulationRunner:
             if process.poll() is None:
                 running.append(sim_id)
         return running
+
+    @classmethod
+    def _get_simulation_mode(cls, simulation_id: str) -> SimulationMode:
+        config_path = os.path.join(cls.RUN_STATE_DIR, simulation_id, "simulation_config.json")
+        if not os.path.exists(config_path):
+            return SimulationMode.SOCIAL
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            return SimulationMode.normalize(config.get("simulation_mode"))
+        except Exception:
+            return SimulationMode.SOCIAL
     
     # ============== Interview 功能 ==============
     
@@ -1376,6 +2297,8 @@ class SimulationRunner:
         Returns:
             True 表示环境存活，False 表示环境已关闭
         """
+        if cls._get_simulation_mode(simulation_id) == SimulationMode.WORLD:
+            return False
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         if not os.path.exists(sim_dir):
             return False
@@ -1394,6 +2317,15 @@ class SimulationRunner:
         Returns:
             状态详情字典，包含 status, twitter_available, reddit_available, timestamp
         """
+        if cls._get_simulation_mode(simulation_id) == SimulationMode.WORLD:
+            return {
+                "status": "unsupported",
+                "twitter_available": False,
+                "reddit_available": False,
+                "world_available": False,
+                "message": "world 模式暂不支持实时采访环境",
+                "timestamp": None,
+            }
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         status_file = os.path.join(sim_dir, "env_status.json")
         
@@ -1401,6 +2333,7 @@ class SimulationRunner:
             "status": "stopped",
             "twitter_available": False,
             "reddit_available": False,
+            "world_available": False,
             "timestamp": None
         }
         
@@ -1414,6 +2347,7 @@ class SimulationRunner:
                 "status": status.get("status", "stopped"),
                 "twitter_available": status.get("twitter_available", False),
                 "reddit_available": status.get("reddit_available", False),
+                "world_available": status.get("world_available", False),
                 "timestamp": status.get("timestamp")
             }
         except (json.JSONDecodeError, OSError):
@@ -1451,6 +2385,9 @@ class SimulationRunner:
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         if not os.path.exists(sim_dir):
             raise ValueError(f"模拟不存在: {simulation_id}")
+
+        if cls._get_simulation_mode(simulation_id) == SimulationMode.WORLD:
+            raise ValueError("world 模式暂不支持实时角色采访")
 
         ipc_client = SimulationIPCClient(sim_dir)
 
@@ -1514,6 +2451,9 @@ class SimulationRunner:
         if not os.path.exists(sim_dir):
             raise ValueError(f"模拟不存在: {simulation_id}")
 
+        if cls._get_simulation_mode(simulation_id) == SimulationMode.WORLD:
+            raise ValueError("world 模式暂不支持实时角色采访")
+
         ipc_client = SimulationIPCClient(sim_dir)
 
         if not ipc_client.check_env_alive():
@@ -1571,6 +2511,9 @@ class SimulationRunner:
         if not os.path.exists(sim_dir):
             raise ValueError(f"模拟不存在: {simulation_id}")
 
+        if cls._get_simulation_mode(simulation_id) == SimulationMode.WORLD:
+            raise ValueError("world 模式暂不支持实时角色采访")
+
         # 从配置文件获取所有Agent信息
         config_path = os.path.join(sim_dir, "simulation_config.json")
         if not os.path.exists(config_path):
@@ -1623,6 +2566,12 @@ class SimulationRunner:
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
         if not os.path.exists(sim_dir):
             raise ValueError(f"模拟不存在: {simulation_id}")
+
+        if cls._get_simulation_mode(simulation_id) == SimulationMode.WORLD:
+            return {
+                "success": True,
+                "message": "world 模式没有可关闭的实时采访环境",
+            }
         
         ipc_client = SimulationIPCClient(sim_dir)
         
@@ -1760,4 +2709,3 @@ class SimulationRunner:
             results = results[:limit]
         
         return results
-

@@ -1,0 +1,158 @@
+{
+  "name": "world-decision-eval",
+  "description": "Decision-grade world simulation eval using targeted candidate shortlists and parallel per-case execution.",
+  "execution": {
+    "max_parallel": 3
+  },
+  "actor_smoke": {
+    "description": "Single-tick actor sweep with a fixed balanced GPT-5.4 resolver.",
+    "score_profile": "latency_smoke",
+    "shared_max_rounds": 1,
+    "shared_repeat_count": 1,
+    "baseline_resolver_selector": "world_resolver_balanced",
+    "runtime_overrides": {
+      "intent_agents_per_tick": 4,
+      "intent_concurrency": 4,
+      "resolver_cluster_size": 2,
+      "resolver_cluster_concurrency": 2,
+      "max_active_events": 4,
+      "max_queued_events": 6,
+      "max_event_duration_ticks": 3,
+      "resolver_salvage_on_zero_accept": true,
+      "provider_preflight_check": true,
+      "provider_max_retries": 1,
+      "actor_on_failure": "defer",
+      "resolver_on_failure": "pause"
+    },
+    "candidates": [
+      {
+        "candidate_id": "gpt54_fast",
+        "label": "GPT-5.4 Fast / world selector",
+        "selector": "world_actor_fast"
+      },
+      {
+        "candidate_id": "gpt54_balanced",
+        "label": "GPT-5.4 Balanced / world selector",
+        "selector": "default_primary"
+      },
+      {
+        "candidate_id": "gpt54_deep",
+        "label": "GPT-5.4 Deep / world selector",
+        "selector": "world_report_deep"
+      },
+      {
+        "candidate_id": "gemini31pro",
+        "label": "Gemini 3.1 Pro / litellm",
+        "selector": "eval_litellm_gemini31pro"
+      },
+      {
+        "candidate_id": "qwen35_plus",
+        "label": "Qwen 3.5 Plus / aliyun-bailian",
+        "selector": "eval_aliyun_qwen35_plus"
+      },
+      {
+        "candidate_id": "qwen35_flash",
+        "label": "Qwen 3.5 Flash / aliyun-bailian",
+        "selector": "eval_aliyun_qwen35_flash"
+      },
+      {
+        "candidate_id": "kimi_k25",
+        "label": "Kimi K2.5 / aliyun-bailian",
+        "selector": "eval_aliyun_kimi_k25"
+      },
+      {
+        "candidate_id": "minimax_m25",
+        "label": "MiniMax M2.5 / aliyun-bailian",
+        "selector": "eval_aliyun_minimax_m25"
+      },
+      {
+        "candidate_id": "claude_opus_xiavier",
+        "label": "Claude Opus 4.6 / xiavier",
+        "selector": "eval_xiavier_claude_opus46"
+      }
+    ]
+  },
+  "resolver_smoke": {
+    "description": "Single-tick resolver sweep with the winning actor from actor smoke.",
+    "score_profile": "latency_smoke",
+    "shared_max_rounds": 1,
+    "shared_repeat_count": 1,
+    "runtime_overrides": {
+      "intent_agents_per_tick": 4,
+      "intent_concurrency": 4,
+      "resolver_cluster_size": 2,
+      "resolver_cluster_concurrency": 2,
+      "max_active_events": 4,
+      "max_queued_events": 6,
+      "max_event_duration_ticks": 3,
+      "resolver_salvage_on_zero_accept": true,
+      "provider_preflight_check": true,
+      "provider_max_retries": 1,
+      "actor_on_failure": "defer",
+      "resolver_on_failure": "pause"
+    },
+    "candidates": [
+      {
+        "candidate_id": "gpt54_balanced",
+        "label": "GPT-5.4 Balanced / world selector",
+        "selector": "world_resolver_balanced"
+      },
+      {
+        "candidate_id": "gpt54_deep",
+        "label": "GPT-5.4 Deep / world selector",
+        "selector": "world_report_deep"
+      },
+      {
+        "candidate_id": "gemini31pro",
+        "label": "Gemini 3.1 Pro / litellm",
+        "selector": "eval_litellm_gemini31pro"
+      },
+      {
+        "candidate_id": "qwen35_plus",
+        "label": "Qwen 3.5 Plus / aliyun-bailian",
+        "selector": "eval_aliyun_qwen35_plus"
+      },
+      {
+        "candidate_id": "claude_opus_xiavier",
+        "label": "Claude Opus 4.6 / xiavier",
+        "selector": "eval_xiavier_claude_opus46"
+      }
+    ]
+  },
+  "progression": {
+    "description": "Three-tick combo sweep for the strongest actor/resolver pairings.",
+    "score_profile": "progression_mini",
+    "shared_max_rounds": 3,
+    "shared_repeat_count": 1,
+    "top_actor_overall_count": 2,
+    "top_actor_metric_winners": [
+      "speed",
+      "cleanliness"
+    ],
+    "top_resolver_overall_count": 2,
+    "top_resolver_metric_winners": [
+      "progression",
+      "resilience"
+    ],
+    "combo_limit": 4,
+    "runtime_overrides": {
+      "intent_agents_per_tick": 4,
+      "intent_concurrency": 4,
+      "resolver_cluster_size": 2,
+      "resolver_cluster_concurrency": 2,
+      "max_active_events": 4,
+      "max_queued_events": 6,
+      "max_event_duration_ticks": 2,
+      "resolver_salvage_on_zero_accept": true,
+      "provider_preflight_check": true,
+      "provider_max_retries": 1,
+      "actor_on_failure": "defer",
+      "resolver_on_failure": "pause"
+    }
+  },
+  "final_repeats": {
+    "description": "Repeat the best progression finalists for stability.",
+    "top_combo_count": 2,
+    "shared_repeat_count": 3
+  }
+}

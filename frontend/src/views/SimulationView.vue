@@ -49,6 +49,18 @@
       <!-- Right Panel: Step2 环境搭建 -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
         <Step2EnvSetup
+          v-if="simulationMode !== 'world'"
+          :simulationId="currentSimulationId"
+          :projectData="projectData"
+          :graphData="graphData"
+          :systemLogs="systemLogs"
+          @go-back="handleGoBack"
+          @next-step="handleNextStep"
+          @add-log="addLog"
+          @update-status="updateStatus"
+        />
+        <Step2WorldSetup
+          v-else
           :simulationId="currentSimulationId"
           :projectData="projectData"
           :graphData="graphData"
@@ -68,6 +80,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
+import Step2WorldSetup from '../components/Step2WorldSetup.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
 
@@ -89,6 +102,7 @@ const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
 const currentStatus = ref('processing') // processing | completed | error
+const simulationMode = ref('social')
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -243,12 +257,14 @@ const loadSimulationData = async () => {
     const simRes = await getSimulation(currentSimulationId.value)
     if (simRes.success && simRes.data) {
       const simData = simRes.data
+      simulationMode.value = simData.simulation_mode || 'social'
       
       // 获取 project 信息
       if (simData.project_id) {
         const projRes = await getProject(simData.project_id)
         if (projRes.success && projRes.data) {
           projectData.value = projRes.data
+          simulationMode.value = projRes.data.simulation_mode || simulationMode.value
           addLog(`项目加载成功: ${projRes.data.project_id}`)
           
           // 获取 graph 数据
@@ -431,4 +447,3 @@ onMounted(async () => {
   border-right: 1px solid #EAEAEA;
 }
 </style>
-

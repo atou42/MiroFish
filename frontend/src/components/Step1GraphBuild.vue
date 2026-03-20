@@ -218,12 +218,19 @@ const handleEnterEnvSetup = async () => {
   creatingSimulation.value = true
   
   try {
-    const res = await createSimulation({
+    const simulationMode = props.projectData?.simulation_mode || 'social'
+    const payload = {
       project_id: props.projectData.project_id,
       graph_id: props.projectData.graph_id,
-      enable_twitter: true,
-      enable_reddit: true
-    })
+      simulation_mode: simulationMode
+    }
+
+    if (simulationMode === 'social') {
+      payload.enable_twitter = true
+      payload.enable_reddit = true
+    }
+
+    const res = await createSimulation(payload)
     
     if (res.success && res.data?.simulation_id) {
       // 跳转到 simulation 页面

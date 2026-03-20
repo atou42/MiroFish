@@ -9,6 +9,7 @@ Thumbs.db
 .env.development
 .env.test
 .env.production
+llm_registry.json
 
 # Python
 __pycache__/

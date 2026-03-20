@@ -2,7 +2,7 @@ import service, { requestWithRetry } from './index'
 
 /**
  * 创建模拟
- * @param {Object} data - { project_id, graph_id?, enable_twitter?, enable_reddit? }
+ * @param {Object} data - { project_id, graph_id?, simulation_mode?, enable_twitter?, enable_reddit? }
  */
 export const createSimulation = (data) => {
   return requestWithRetry(() => service.post('/api/simulation/create', data), 3, 1000)
@@ -35,7 +35,7 @@ export const getSimulation = (simulationId) => {
 /**
  * 获取模拟的 Agent Profiles
  * @param {string} simulationId
- * @param {string} platform - 'reddit' | 'twitter'
+ * @param {string} platform - 'reddit' | 'twitter' | 'world'
  */
 export const getSimulationProfiles = (simulationId, platform = 'reddit') => {
   return service.get(`/api/simulation/${simulationId}/profiles`, { params: { platform } })
@@ -44,7 +44,7 @@ export const getSimulationProfiles = (simulationId, platform = 'reddit') => {
 /**
  * 实时获取生成中的 Agent Profiles
  * @param {string} simulationId
- * @param {string} platform - 'reddit' | 'twitter'
+ * @param {string} platform - 'reddit' | 'twitter' | 'world'
  */
 export const getSimulationProfilesRealtime = (simulationId, platform = 'reddit') => {
   return service.get(`/api/simulation/${simulationId}/profiles/realtime`, { params: { platform } })
@@ -65,6 +65,13 @@ export const getSimulationConfig = (simulationId) => {
  */
 export const getSimulationConfigRealtime = (simulationId) => {
   return service.get(`/api/simulation/${simulationId}/config/realtime`)
+}
+
+/**
+ * 获取 world runtime presets
+ */
+export const getWorldPresets = () => {
+  return service.get('/api/simulation/world-presets')
 }
 
 /**
@@ -90,6 +97,22 @@ export const startSimulation = (data) => {
  */
 export const stopSimulation = (data) => {
   return service.post('/api/simulation/stop', data)
+}
+
+/**
+ * 暂停模拟
+ * @param {Object} data - { simulation_id }
+ */
+export const pauseSimulation = (data) => {
+  return service.post('/api/simulation/pause', data)
+}
+
+/**
+ * 恢复模拟
+ * @param {Object} data - { simulation_id }
+ */
+export const resumeSimulation = (data) => {
+  return service.post('/api/simulation/resume', data)
 }
 
 /**
@@ -184,4 +207,3 @@ export const interviewAgents = (data) => {
 export const getSimulationHistory = (limit = 20) => {
   return service.get('/api/simulation/history', { params: { limit } })
 }
-

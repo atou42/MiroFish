@@ -4,6 +4,7 @@ Step2: Zep实体读取与过滤、OASIS模拟准备与运行（全程自动化�
 """
 
 import os
+import json
 import traceback
 from flask import request, jsonify, send_file
 
@@ -12,9 +13,11 @@ from ..config import Config
 from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
 from ..services.simulation_manager import SimulationManager, SimulationStatus
+from ..services.world_preset_registry import WorldPresetRegistry
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..utils.logger import get_logger
 from ..models.project import ProjectManager
+from ..models.simulation_mode import SimulationMode
 
 logger = get_logger('mirofish.api.simulation')
 
@@ -40,6 +43,42 @@ def optimize_interview_prompt(prompt: str) -> str:
     if prompt.startswith(INTERVIEW_PROMPT_PREFIX):
         return prompt
     return f"{INTERVIEW_PROMPT_PREFIX}{prompt}"
+
+
+def _build_world_resume_payload(simulation_id: str, run_state=None) -> Dict[str, Any]:
+    checkpoint_meta = SimulationRunner.get_world_checkpoint_meta(simulation_id)
+    live_process = SimulationRunner.has_live_process(simulation_id)
+    runner_status = run_state.runner_status.value if run_state else "idle"
+
+    resume_supported = False
+    resume_mode = None
+
+    if runner_status == RunnerStatus.PAUSED.value and live_process:
+        resume_supported = True
+        resume_mode = "process"
+    elif checkpoint_meta:
+        checkpoint_total = checkpoint_meta.get("run_total_rounds") or 0
+        checkpoint_tick = checkpoint_meta.get("last_completed_tick") or 0
+        remaining = checkpoint_total <= 0 or checkpoint_tick < checkpoint_total
+        if runner_status in {
+            RunnerStatus.PAUSED.value,
+            RunnerStatus.STOPPED.value,
+            RunnerStatus.FAILED.value,
+            RunnerStatus.IDLE.value,
+        } and remaining:
+            resume_supported = True
+            resume_mode = "checkpoint"
+
+    return {
+        "checkpoint_available": bool(checkpoint_meta),
+        "checkpoint_saved_at": checkpoint_meta.get("saved_at") if checkpoint_meta else None,
+        "checkpoint_tick": checkpoint_meta.get("last_completed_tick", 0) if checkpoint_meta else 0,
+        "checkpoint_total_rounds": checkpoint_meta.get("run_total_rounds", 0) if checkpoint_meta else 0,
+        "checkpoint_status": checkpoint_meta.get("status") if checkpoint_meta else None,
+        "resume_supported": resume_supported,
+        "resume_mode": resume_mode,
+        "live_process": live_process,
+    }
 
 
 # ============== 实体读取接口 ==============
@@ -215,11 +254,15 @@ def create_simulation():
             }), 400
         
         manager = SimulationManager()
+        simulation_mode = SimulationMode.normalize(
+            data.get('simulation_mode') or getattr(project, 'simulation_mode', None)
+        ).value
         state = manager.create_simulation(
             project_id=project_id,
             graph_id=graph_id,
             enable_twitter=data.get('enable_twitter', True),
             enable_reddit=data.get('enable_reddit', True),
+            simulation_mode=simulation_mode,
         )
         
         return jsonify({
@@ -229,6 +272,23 @@ def create_simulation():
         
     except Exception as e:
         logger.error(f"创建模拟失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/world-presets', methods=['GET'])
+def list_world_presets():
+    """List available world runtime presets."""
+    try:
+        return jsonify({
+            "success": True,
+            "data": WorldPresetRegistry.build_api_payload(),
+        })
+    except Exception as e:
+        logger.error(f"获取 world presets 失败: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),
@@ -261,13 +321,28 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
     if not os.path.exists(simulation_dir):
         return False, {"reason": "模拟目录不存在"}
     
-    # 必要文件列表（不包括脚本，脚本位于 backend/scripts/）
-    required_files = [
-        "state.json",
-        "simulation_config.json",
-        "reddit_profiles.json",
-        "twitter_profiles.csv"
-    ]
+    state_file = os.path.join(simulation_dir, "state.json")
+    simulation_mode = SimulationMode.SOCIAL.value
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                simulation_mode = SimulationMode.normalize(json.load(f).get("simulation_mode")).value
+        except Exception:
+            simulation_mode = SimulationMode.SOCIAL.value
+
+    if simulation_mode == SimulationMode.WORLD.value:
+        required_files = [
+            "state.json",
+            "simulation_config.json",
+            "world_profiles.json",
+        ]
+    else:
+        required_files = [
+            "state.json",
+            "simulation_config.json",
+            "reddit_profiles.json",
+            "twitter_profiles.csv"
+        ]
     
     # 检查文件是否存在
     existing_files = []
@@ -287,9 +362,7 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         }
     
     # 检查state.json中的状态
-    state_file = os.path.join(simulation_dir, "state.json")
     try:
-        import json
         with open(state_file, 'r', encoding='utf-8') as f:
             state_data = json.load(f)
         
@@ -310,7 +383,10 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         prepared_statuses = ["ready", "preparing", "running", "completed", "stopped", "failed"]
         if status in prepared_statuses and config_generated:
             # 获取文件统计信息
-            profiles_file = os.path.join(simulation_dir, "reddit_profiles.json")
+            if simulation_mode == SimulationMode.WORLD.value:
+                profiles_file = os.path.join(simulation_dir, "world_profiles.json")
+            else:
+                profiles_file = os.path.join(simulation_dir, "reddit_profiles.json")
             config_file = os.path.join(simulation_dir, "simulation_config.json")
             
             profiles_count = 0
@@ -332,6 +408,18 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
                 except Exception as e:
                     logger.warning(f"自动更新状态失败: {e}")
             
+            config_payload = {}
+            world_preset_id = None
+            if simulation_mode == SimulationMode.WORLD.value and os.path.exists(config_file):
+                try:
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        config_payload = json.load(f)
+                    world_preset_id = (
+                        config_payload.get("preset", {}) or {}
+                    ).get("id")
+                except Exception as config_exc:
+                    logger.warning(f"读取 world preset 信息失败: {config_exc}")
+
             logger.info(f"模拟 {simulation_id} 检测结果: 已准备完成 (status={status}, config_generated={config_generated})")
             return True, {
                 "status": status,
@@ -341,7 +429,9 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
                 "config_generated": config_generated,
                 "created_at": state_data.get("created_at"),
                 "updated_at": state_data.get("updated_at"),
-                "existing_files": existing_files
+                "existing_files": existing_files,
+                "world_preset_id": world_preset_id,
+                "world_preset": config_payload.get("preset", {}) if isinstance(config_payload, dict) else {},
             }
         else:
             logger.warning(f"模拟 {simulation_id} 检测结果: 未准备完成 (status={status}, config_generated={config_generated})")
@@ -381,7 +471,8 @@ def prepare_simulation():
             "entity_types": ["Student", "PublicFigure"],  // 可选，指定实体类型
             "use_llm_for_profiles": true,                 // 可选，是否用LLM生成人设
             "parallel_profile_count": 5,                  // 可选，并行生成人设数量，默认5
-            "force_regenerate": false                     // 可选，强制重新生成，默认false
+            "force_regenerate": false,                    // 可选，强制重新生成，默认false
+            "world_preset_id": "recommended_stable"      // world 模式可选，指定 preset
         }
     
     返回：
@@ -410,7 +501,7 @@ def prepare_simulation():
                 "success": False,
                 "error": "请提供 simulation_id"
             }), 400
-        
+
         manager = SimulationManager()
         state = manager.get_simulation(simulation_id)
         
@@ -422,25 +513,49 @@ def prepare_simulation():
         
         # 检查是否强制重新生成
         force_regenerate = data.get('force_regenerate', False)
+        world_preset_id = data.get('world_preset_id')
         logger.info(f"开始处理 /prepare 请求: simulation_id={simulation_id}, force_regenerate={force_regenerate}")
+
+        resolved_world_preset = None
+        if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+            try:
+                resolved_world_preset = WorldPresetRegistry.get_preset(world_preset_id)
+                world_preset_id = resolved_world_preset.preset_id
+            except ValueError as preset_exc:
+                return jsonify({
+                    "success": False,
+                    "error": str(preset_exc)
+                }), 400
         
         # 检查是否已经准备完成（避免重复生成）
         if not force_regenerate:
             logger.debug(f"检查模拟 {simulation_id} 是否已准备完成...")
             is_prepared, prepare_info = _check_simulation_prepared(simulation_id)
             logger.debug(f"检查结果: is_prepared={is_prepared}, prepare_info={prepare_info}")
+            requested_preset_mismatch = (
+                resolved_world_preset is not None
+                and prepare_info.get("world_preset_id") != world_preset_id
+            )
             if is_prepared:
-                logger.info(f"模拟 {simulation_id} 已准备完成，跳过重复生成")
-                return jsonify({
-                    "success": True,
-                    "data": {
-                        "simulation_id": simulation_id,
-                        "status": "ready",
-                        "message": "已有完成的准备工作，无需重复生成",
-                        "already_prepared": True,
-                        "prepare_info": prepare_info
-                    }
-                })
+                if requested_preset_mismatch:
+                    logger.info(
+                        "模拟 %s 已准备完成，但现有 preset=%s 与请求 preset=%s 不一致，将继续重新生成",
+                        simulation_id,
+                        prepare_info.get("world_preset_id"),
+                        world_preset_id,
+                    )
+                else:
+                    logger.info(f"模拟 {simulation_id} 已准备完成，跳过重复生成")
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "simulation_id": simulation_id,
+                            "status": "ready",
+                            "message": "已有完成的准备工作，无需重复生成",
+                            "already_prepared": True,
+                            "prepare_info": prepare_info
+                        }
+                    })
             else:
                 logger.info(f"模拟 {simulation_id} 未准备完成，将启动准备任务")
         
@@ -498,6 +613,12 @@ def prepare_simulation():
         
         # 更新模拟状态（包含预先获取的实体数量）
         state.status = SimulationStatus.PREPARING
+        if resolved_world_preset is not None:
+            state.runtime_metadata = {
+                **(state.runtime_metadata or {}),
+                "requested_world_preset_id": resolved_world_preset.preset_id,
+                "requested_world_preset_label": resolved_world_preset.label,
+            }
         manager._save_simulation_state(state)
         
         # 定义后台任务
@@ -582,7 +703,8 @@ def prepare_simulation():
                     defined_entity_types=entity_types_list,
                     use_llm_for_profiles=use_llm_for_profiles,
                     progress_callback=progress_callback,
-                    parallel_profile_count=parallel_profile_count
+                    parallel_profile_count=parallel_profile_count,
+                    world_preset_id=world_preset_id,
                 )
                 
                 # 任务完成
@@ -615,7 +737,9 @@ def prepare_simulation():
                 "message": "准备任务已启动，请通过 /api/simulation/prepare/status 查询进度",
                 "already_prepared": False,
                 "expected_entities_count": state.entities_count,  # 预期的Agent总数
-                "entity_types": state.entity_types  # 实体类型列表
+                "entity_types": state.entity_types,  # 实体类型列表
+                "world_preset_id": world_preset_id,
+                "world_preset_label": resolved_world_preset.label if resolved_world_preset else None,
             }
         })
         
@@ -991,9 +1115,18 @@ def get_simulation_profiles(simulation_id: str):
         platform: 平台类型（reddit/twitter，默认reddit）
     """
     try:
-        platform = request.args.get('platform', 'reddit')
-        
         manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": f"模拟不存在: {simulation_id}"
+            }), 404
+
+        platform = request.args.get(
+            'platform',
+            'world' if state.simulation_mode == SimulationMode.WORLD.value else 'reddit'
+        )
         profiles = manager.get_profiles(simulation_id, platform=platform)
         
         return jsonify({
@@ -1053,7 +1186,17 @@ def get_simulation_profiles_realtime(simulation_id: str):
     from datetime import datetime
     
     try:
-        platform = request.args.get('platform', 'reddit')
+        state = SimulationManager().get_simulation(simulation_id)
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": f"模拟不存在: {simulation_id}"
+            }), 404
+
+        platform = request.args.get(
+            'platform',
+            'world' if state.simulation_mode == SimulationMode.WORLD.value else 'reddit'
+        )
         
         # 获取模拟目录
         sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
@@ -1065,7 +1208,9 @@ def get_simulation_profiles_realtime(simulation_id: str):
             }), 404
         
         # 确定文件路径
-        if platform == "reddit":
+        if platform == "world":
+            profiles_file = os.path.join(sim_dir, "world_profiles.json")
+        elif platform == "reddit":
             profiles_file = os.path.join(sim_dir, "reddit_profiles.json")
         else:
             profiles_file = os.path.join(sim_dir, "twitter_profiles.csv")
@@ -1081,7 +1226,7 @@ def get_simulation_profiles_realtime(simulation_id: str):
             file_modified_at = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
             
             try:
-                if platform == "reddit":
+                if platform in ("reddit", "world"):
                     with open(profiles_file, 'r', encoding='utf-8') as f:
                         profiles = json.load(f)
                 else:
@@ -1233,7 +1378,9 @@ def get_simulation_config_realtime(simulation_id: str):
                 "has_twitter_config": "twitter_config" in config,
                 "has_reddit_config": "reddit_config" in config,
                 "generated_at": config.get("generated_at"),
-                "llm_model": config.get("llm_model")
+                "llm_model": config.get("llm_model"),
+                "llm_provider": config.get("llm_provider"),
+                "llm_profile": config.get("llm_profile"),
             }
         
         return jsonify({
@@ -1494,7 +1641,7 @@ def start_simulation():
                 "error": "请提供 simulation_id"
             }), 400
 
-        platform = data.get('platform', 'parallel')
+        platform = data.get('platform')
         max_rounds = data.get('max_rounds')  # 可选：最大模拟轮数
         enable_graph_memory_update = data.get('enable_graph_memory_update', False)  # 可选：是否启用图谱记忆更新
         force = data.get('force', False)  # 可选：强制重新开始
@@ -1514,12 +1661,6 @@ def start_simulation():
                     "error": "max_rounds 必须是有效的整数"
                 }), 400
 
-        if platform not in ['twitter', 'reddit', 'parallel']:
-            return jsonify({
-                "success": False,
-                "error": f"无效的平台类型: {platform}，可选: twitter/reddit/parallel"
-            }), 400
-
         # 检查模拟是否已准备好
         manager = SimulationManager()
         state = manager.get_simulation(simulation_id)
@@ -1530,6 +1671,20 @@ def start_simulation():
                 "error": f"模拟不存在: {simulation_id}"
             }), 404
 
+        simulation_mode = SimulationMode.normalize(state.simulation_mode).value
+        if not platform:
+            platform = "world" if simulation_mode == SimulationMode.WORLD.value else "parallel"
+
+        valid_platforms = ['twitter', 'reddit', 'parallel']
+        if simulation_mode == SimulationMode.WORLD.value:
+            valid_platforms = ['world']
+
+        if platform not in valid_platforms:
+            return jsonify({
+                "success": False,
+                "error": f"无效的平台类型: {platform}，可选: {', '.join(valid_platforms)}"
+            }), 400
+
         force_restarted = False
         
         # 智能处理状态：如果准备工作已完成，允许重新启动
@@ -1539,11 +1694,17 @@ def start_simulation():
 
             if is_prepared:
                 # 准备工作已完成，检查是否有正在运行的进程
-                if state.status == SimulationStatus.RUNNING:
+                if state.status in [SimulationStatus.RUNNING, SimulationStatus.PAUSED]:
                     # 检查模拟进程是否真的在运行
                     run_state = SimulationRunner.get_run_state(simulation_id)
-                    if run_state and run_state.runner_status.value == "running":
-                        # 进程确实在运行
+                    live_runner_statuses = {
+                        RunnerStatus.STARTING.value,
+                        RunnerStatus.RUNNING.value,
+                        RunnerStatus.PAUSED.value,
+                        RunnerStatus.STOPPING.value,
+                    }
+                    if run_state and run_state.runner_status.value in live_runner_statuses:
+                        # 进程确实仍然存活
                         if force:
                             # 强制模式：停止运行中的模拟
                             logger.info(f"强制模式：停止运行中的模拟 {simulation_id}")
@@ -1552,9 +1713,13 @@ def start_simulation():
                             except Exception as e:
                                 logger.warning(f"停止模拟时出现警告: {str(e)}")
                         else:
+                            if run_state.runner_status == RunnerStatus.PAUSED:
+                                error_message = "模拟当前处于暂停状态，请调用 /resume 接口继续，或使用 force=true 强制重新开始"
+                            else:
+                                error_message = "模拟正在运行中，请先调用 /stop 接口停止，或使用 force=true 强制重新开始"
                             return jsonify({
                                 "success": False,
-                                "error": f"模拟正在运行中，请先调用 /stop 接口停止，或使用 force=true 强制重新开始"
+                                "error": error_message
                             }), 400
 
                 # 如果是强制模式，清理运行日志
@@ -1594,6 +1759,11 @@ def start_simulation():
                 }), 400
             
             logger.info(f"启用图谱记忆更新: simulation_id={simulation_id}, graph_id={graph_id}")
+
+            if simulation_mode == SimulationMode.WORLD.value:
+                logger.info("world 模式下暂不启用图谱记忆更新，已自动关闭该选项")
+                enable_graph_memory_update = False
+                graph_id = None
         
         # 启动模拟
         run_state = SimulationRunner.start_simulation(
@@ -1665,14 +1835,14 @@ def stop_simulation():
                 "success": False,
                 "error": "请提供 simulation_id"
             }), 400
-        
+
         run_state = SimulationRunner.stop_simulation(simulation_id)
         
         # 更新模拟状态
         manager = SimulationManager()
         state = manager.get_simulation(simulation_id)
         if state:
-            state.status = SimulationStatus.PAUSED
+            state.status = SimulationStatus.STOPPED
             manager._save_simulation_state(state)
         
         return jsonify({
@@ -1688,6 +1858,153 @@ def stop_simulation():
         
     except Exception as e:
         logger.error(f"停止模拟失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/pause', methods=['POST'])
+def pause_simulation():
+    """
+    暂停模拟
+
+    请求（JSON）：
+        {
+            "simulation_id": "sim_xxxx"  // 必填，模拟ID
+        }
+    """
+    try:
+        data = request.get_json() or {}
+
+        simulation_id = data.get('simulation_id')
+        if not simulation_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 simulation_id"
+            }), 400
+
+        run_state = SimulationRunner.pause_simulation(simulation_id)
+
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        if state:
+            state.status = SimulationStatus.PAUSED
+            manager._save_simulation_state(state)
+
+        return jsonify({
+            "success": True,
+            "data": run_state.to_dict()
+        })
+
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
+
+    except NotImplementedError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 501
+
+    except Exception as e:
+        logger.error(f"暂停模拟失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/resume', methods=['POST'])
+def resume_simulation():
+    """
+    恢复模拟
+
+    优先恢复仍存活的暂停进程；
+    对于 world 模式，如果进程已退出但 checkpoint 仍在，则从最后一个已提交 tick 续跑。
+
+    请求（JSON）：
+        {
+            "simulation_id": "sim_xxxx",  // 必填，模拟ID
+            "max_rounds": 12               // 可选，world checkpoint 续跑时覆盖总轮数上限
+        }
+    """
+    try:
+        data = request.get_json() or {}
+
+        simulation_id = data.get('simulation_id')
+        max_rounds = data.get('max_rounds')
+        if not simulation_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 simulation_id"
+            }), 400
+
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        simulation_mode = SimulationMode.normalize(
+            state.simulation_mode if state else SimulationMode.SOCIAL.value
+        ).value
+
+        if max_rounds is not None:
+            try:
+                max_rounds = int(max_rounds)
+                if max_rounds <= 0:
+                    return jsonify({
+                        "success": False,
+                        "error": "max_rounds 必须是正整数"
+                    }), 400
+            except (ValueError, TypeError):
+                return jsonify({
+                    "success": False,
+                    "error": "max_rounds 必须是有效的整数"
+                }), 400
+
+        run_state = None
+        resumed_from_checkpoint = False
+
+        if SimulationRunner.has_live_process(simulation_id):
+            run_state = SimulationRunner.resume_simulation(simulation_id)
+        elif simulation_mode == SimulationMode.WORLD.value:
+            run_state = SimulationRunner.resume_world_from_checkpoint(
+                simulation_id=simulation_id,
+                max_rounds=max_rounds,
+            )
+            resumed_from_checkpoint = True
+        else:
+            raise ValueError("当前没有可恢复的存活进程")
+
+        if state:
+            state.status = SimulationStatus.RUNNING
+            manager._save_simulation_state(state)
+
+        response_data = run_state.to_dict()
+        if simulation_mode == SimulationMode.WORLD.value:
+            response_data.update(_build_world_resume_payload(simulation_id, run_state))
+        response_data["resumed_from_checkpoint"] = resumed_from_checkpoint
+        return jsonify({
+            "success": True,
+            "data": response_data
+        })
+
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
+
+    except NotImplementedError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 501
+
+    except Exception as e:
+        logger.error(f"恢复模拟失败: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),
@@ -1725,25 +2042,51 @@ def get_run_status(simulation_id: str):
     """
     try:
         run_state = SimulationRunner.get_run_state(simulation_id)
+        sim_state = SimulationManager().get_simulation(simulation_id)
+        simulation_mode = (
+            sim_state.simulation_mode
+            if sim_state
+            else (run_state.simulation_mode if run_state else SimulationMode.SOCIAL.value)
+        )
         
         if not run_state:
+            idle_payload = {
+                "simulation_id": simulation_id,
+                "simulation_mode": simulation_mode,
+                "runner_status": "idle",
+                "current_round": 0,
+                "total_rounds": 0,
+                "progress_percent": 0,
+                "world_actions_count": 0,
+                "twitter_actions_count": 0,
+                "reddit_actions_count": 0,
+                "total_actions_count": 0,
+            }
+            if simulation_mode == SimulationMode.WORLD.value:
+                idle_payload.update(_build_world_resume_payload(simulation_id))
+                idle_payload.update({
+                    "world_active_events_count": 0,
+                    "world_queued_events_count": 0,
+                    "world_completed_events_count": 0,
+                    "world_current_phase": "idle",
+                    "world_phase_counts": {},
+                    "world_provider_waits_count": 0,
+                    "world_ticks_blocked_count": 0,
+                    "world_intents_deferred_count": 0,
+                    "latest_snapshot": None,
+                })
             return jsonify({
                 "success": True,
-                "data": {
-                    "simulation_id": simulation_id,
-                    "runner_status": "idle",
-                    "current_round": 0,
-                    "total_rounds": 0,
-                    "progress_percent": 0,
-                    "twitter_actions_count": 0,
-                    "reddit_actions_count": 0,
-                    "total_actions_count": 0,
-                }
+                "data": idle_payload
             })
         
+        result = run_state.to_dict()
+        result["simulation_mode"] = simulation_mode
+        if simulation_mode == SimulationMode.WORLD.value:
+            result.update(_build_world_resume_payload(simulation_id, run_state))
         return jsonify({
             "success": True,
-            "data": run_state.to_dict()
+            "data": result
         })
         
     except Exception as e:
@@ -1794,18 +2137,95 @@ def get_run_status_detail(simulation_id: str):
     """
     try:
         run_state = SimulationRunner.get_run_state(simulation_id)
+        sim_state = SimulationManager().get_simulation(simulation_id)
+        simulation_mode = (
+            sim_state.simulation_mode
+            if sim_state
+            else (run_state.simulation_mode if run_state else SimulationMode.SOCIAL.value)
+        )
         platform_filter = request.args.get('platform')
         
         if not run_state:
+            idle_payload = {
+                "simulation_id": simulation_id,
+                "simulation_mode": simulation_mode,
+                "runner_status": "idle",
+                "all_actions": [],
+                "world_actions": [],
+                "twitter_actions": [],
+                "reddit_actions": []
+            }
+            if simulation_mode == SimulationMode.WORLD.value:
+                idle_payload.update(_build_world_resume_payload(simulation_id))
+                idle_payload.update({
+                    "world_event_feed": [],
+                    "world_events": [],
+                    "world_recent_events": [],
+                    "world_active_events": [],
+                    "world_queued_events": [],
+                    "world_timeline": [],
+                    "world_snapshots": [],
+                    "world_metrics": {
+                        "active_events_count": 0,
+                        "queued_events_count": 0,
+                        "completed_events_count": 0,
+                        "current_phase": "idle",
+                        "intents_created_count": 0,
+                        "resolved_intents_count": 0,
+                        "events_started_count": 0,
+                        "events_completed_count": 0,
+                        "provider_waits_count": 0,
+                        "ticks_blocked_count": 0,
+                        "intents_deferred_count": 0,
+                    },
+                    "latest_snapshot": None,
+                })
             return jsonify({
                 "success": True,
-                "data": {
-                    "simulation_id": simulation_id,
-                    "runner_status": "idle",
-                    "all_actions": [],
-                    "twitter_actions": [],
-                    "reddit_actions": []
-                }
+                "data": idle_payload
+            })
+
+        if simulation_mode == SimulationMode.WORLD.value:
+            world_event_feed = SimulationRunner.get_world_events(simulation_id=simulation_id, limit=500)
+            world_timeline = SimulationRunner.get_timeline(
+                simulation_id=simulation_id,
+                start_round=0,
+                end_round=None,
+            )
+            world_snapshots = SimulationRunner.get_world_snapshots(simulation_id=simulation_id, limit=20)
+
+            result = run_state.to_detail_dict()
+            result["simulation_mode"] = simulation_mode
+            result.update(_build_world_resume_payload(simulation_id, run_state))
+            result["all_actions"] = []
+            result["world_actions"] = []
+            result["twitter_actions"] = []
+            result["reddit_actions"] = []
+            result["world_event_feed"] = world_event_feed
+            result["world_events"] = world_event_feed
+            result["world_recent_events"] = run_state.world_recent_events
+            result["world_active_events"] = run_state.world_active_events
+            result["world_queued_events"] = run_state.world_queued_events
+            result["world_timeline"] = world_timeline
+            result["world_snapshots"] = world_snapshots
+            result["world_metrics"] = {
+                "active_events_count": result.get("world_active_events_count", 0),
+                "queued_events_count": result.get("world_queued_events_count", 0),
+                "completed_events_count": result.get("world_completed_events_count", 0),
+                "current_phase": result.get("world_current_phase", "idle"),
+                "intents_created_count": result.get("world_intents_created_count", 0),
+                "resolved_intents_count": result.get("world_resolved_intents_count", 0),
+                "events_started_count": result.get("world_events_started_count", 0),
+                "events_completed_count": result.get("world_events_completed_count", 0),
+                "provider_waits_count": result.get("world_provider_waits_count", 0),
+                "ticks_blocked_count": result.get("world_ticks_blocked_count", 0),
+                "intents_deferred_count": result.get("world_intents_deferred_count", 0),
+            }
+            result["recent_actions"] = []
+
+            return jsonify({
+                "success": True,
+                "data": result
             })
         
         # 获取完整的动作列表
@@ -1824,6 +2244,11 @@ def get_run_status_detail(simulation_id: str):
             simulation_id=simulation_id,
             platform="reddit"
         ) if not platform_filter or platform_filter == "reddit" else []
+
+        world_actions = SimulationRunner.get_all_actions(
+            simulation_id=simulation_id,
+            platform="world"
+        ) if not platform_filter or platform_filter == "world" else []
         
         # 获取当前轮次的动作（recent_actions 只展示最新一轮）
         current_round = run_state.current_round
@@ -1835,7 +2260,9 @@ def get_run_status_detail(simulation_id: str):
         
         # 获取基础状态信息
         result = run_state.to_dict()
+        result["simulation_mode"] = simulation_mode
         result["all_actions"] = [a.to_dict() for a in all_actions]
+        result["world_actions"] = [a.to_dict() for a in world_actions]
         result["twitter_actions"] = [a.to_dict() for a in twitter_actions]
         result["reddit_actions"] = [a.to_dict() for a in reddit_actions]
         result["rounds_count"] = len(run_state.rounds)
@@ -2199,6 +2626,18 @@ def interview_agent():
                 "success": False,
                 "error": "请提供 simulation_id"
             }), 400
+
+        sim_state = SimulationManager().get_simulation(simulation_id)
+        if sim_state and SimulationMode.normalize(sim_state.simulation_mode) == SimulationMode.WORLD:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "count": 0,
+                    "history": [],
+                    "simulation_mode": SimulationMode.WORLD.value,
+                    "message": "world 模式没有 Interview 历史。"
+                }
+            })
         
         if agent_id is None:
             return jsonify({
@@ -2210,6 +2649,13 @@ def interview_agent():
             return jsonify({
                 "success": False,
                 "error": "请提供 prompt（采访问题）"
+            }), 400
+
+        sim_state = SimulationManager().get_simulation(simulation_id)
+        if sim_state and sim_state.simulation_mode == SimulationMode.WORLD.value:
+            return jsonify({
+                "success": False,
+                "error": "world 模式暂不支持实时角色采访，请使用 Report Agent 的 graph-only 分析。"
             }), 400
         
         # 验证platform参数
@@ -2325,6 +2771,13 @@ def interview_agents_batch():
             return jsonify({
                 "success": False,
                 "error": "请提供 interviews（采访列表）"
+            }), 400
+
+        sim_state = SimulationManager().get_simulation(simulation_id)
+        if sim_state and sim_state.simulation_mode == SimulationMode.WORLD.value:
+            return jsonify({
+                "success": False,
+                "error": "world 模式暂不支持批量角色采访，请改用 Report Agent 对话。"
             }), 400
 
         # 验证platform参数
@@ -2611,12 +3064,17 @@ def get_env_status():
                 "error": "请提供 simulation_id"
             }), 400
 
+        sim_state = SimulationManager().get_simulation(simulation_id)
+        simulation_mode = sim_state.simulation_mode if sim_state else SimulationMode.SOCIAL.value
+
         env_alive = SimulationRunner.check_env_alive(simulation_id)
         
         # 获取更详细的状态信息
         env_status = SimulationRunner.get_env_status_detail(simulation_id)
 
-        if env_alive:
+        if simulation_mode == SimulationMode.WORLD.value:
+            message = "world 模式暂不支持实时采访环境"
+        elif env_alive:
             message = "环境正在运行，可以接收Interview命令"
         else:
             message = "环境未运行或已关闭"
@@ -2625,9 +3083,11 @@ def get_env_status():
             "success": True,
             "data": {
                 "simulation_id": simulation_id,
+                "simulation_mode": simulation_mode,
                 "env_alive": env_alive,
                 "twitter_available": env_status.get("twitter_available", False),
                 "reddit_available": env_status.get("reddit_available", False),
+                "world_available": env_status.get("world_available", False),
                 "message": message
             }
         })
