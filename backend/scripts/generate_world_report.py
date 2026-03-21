@@ -71,6 +71,16 @@ def validate_report_artifacts(report_id: str, report_dir: str = "") -> List[str]
     sections = outline.get("sections") if isinstance(outline, dict) else []
     if not isinstance(sections, list) or not sections:
         errors.append("report outline sections missing")
+    else:
+        normalized_sections = []
+        for item in sections:
+            if not isinstance(item, dict):
+                continue
+            content = " ".join(str(item.get("content") or "").split()).strip().lower()
+            if content:
+                normalized_sections.append(content)
+        if len(set(normalized_sections)) < len(normalized_sections):
+            errors.append("report sections appear duplicated")
 
     if not os.path.exists(progress_path):
         errors.append("report progress.json missing")

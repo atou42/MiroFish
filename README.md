@@ -1,241 +1,301 @@
 <div align="center">
 
-<img src="./static/image/MiroFish_logo_compressed.jpeg" alt="MiroFish Logo" width="75%"/>
+<img src="./static/image/MiroFish_logo_compressed.jpeg" alt="MiroFish Logo" width="72%"/>
 
-<a href="https://trendshift.io/repositories/16144" target="_blank"><img src="https://trendshift.io/api/badge/repositories/16144" alt="666ghj%2FMiroFish | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+# MiroFish World Fork
 
-简洁通用的群体智能引擎，预测万物
-</br>
-<em>A Simple and Universal Swarm Intelligence Engine, Predicting Anything</em>
-
-<a href="https://www.shanda.com/" target="_blank"><img src="./static/image/shanda_logo.png" alt="666ghj%2MiroFish | Shanda" height="40"/></a>
-
-[![GitHub Stars](https://img.shields.io/github/stars/666ghj/MiroFish?style=flat-square&color=DAA520)](https://github.com/666ghj/MiroFish/stargazers)
-[![GitHub Watchers](https://img.shields.io/github/watchers/666ghj/MiroFish?style=flat-square)](https://github.com/666ghj/MiroFish/watchers)
-[![GitHub Forks](https://img.shields.io/github/forks/666ghj/MiroFish?style=flat-square)](https://github.com/666ghj/MiroFish/network)
-[![Docker](https://img.shields.io/badge/Docker-Build-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/666ghj/MiroFish)
-
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white)](http://discord.gg/ePf5aPaHnA)
-[![X](https://img.shields.io/badge/X-Follow-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/mirofish_ai)
-[![Instagram](https://img.shields.io/badge/Instagram-Follow-E4405F?style=flat-square&logo=instagram&logoColor=white)](https://www.instagram.com/mirofish_ai/)
-
-[English](./README-EN.md) | [中文文档](./README.md)
+面向长程 world simulation 的 MiroFish 分支：多模型路由、checkpoint / resume、preset / eval、operator 工具链，以及可持续推进的世界演绎工作流。
 
 </div>
 
-## ⚡ 项目概述
+## Fork 说明
 
-**MiroFish** 是一款基于多智能体技术的新一代 AI 预测引擎。通过提取现实世界的种子信息（如突发新闻、政策草案、金融信号），自动构建出高保真的平行数字世界。在此空间内，成千上万个具备独立人格、长期记忆与行为逻辑的智能体进行自由交互与社会演化。你可透过「上帝视角」动态注入变量，精准推演未来走向——**让未来在数字沙盘中预演，助决策在百战模拟后胜出**。
+- 上游项目：[`666ghj/MiroFish`](https://github.com/666ghj/MiroFish)
+- 本仓库定位：保留 GitHub fork 关系，在上游能力基础上，把 `world mode` 打磨成更适合长期运行、持续观测、持续迭代的版本
+- 协议延续：`AGPL-3.0`
 
-> 你只需：上传种子材料（数据分析报告或者有趣的小说故事），并用自然语言描述预测需求</br>
-> MiroFish 将返回：一份详尽的预测报告，以及一个可深度交互的高保真数字世界
+如果你想看上游项目原始的“通用预测引擎 / 社交模拟”定位，请直接参考 upstream。  
+如果你要的是“给定世界观、角色、冲突与规则，让系统稳定地长期推进，并能 checkpoint / resume / eval / diagnostics”，这个 fork 才是现在更合适的入口。
 
-### 我们的愿景
+## 这个 fork 重点做了什么
 
-MiroFish 致力于打造映射现实的群体智能镜像，通过捕捉个体互动引发的群体涌现，突破传统预测的局限：
+- 把 `world mode` 当成一等公民，而不是附属功能
+- 增强 `checkpoint -> resume -> restore -> finalize` 的完整链路
+- 增强 operator CLI：
+  - `run`
+  - `resume`
+  - `status`
+  - `restore`
+  - `finalize`
+  - `staged`
+- 打通运行态观测：
+  - `run_state.json`
+  - `world/checkpoint.json`
+  - `world/actions.jsonl`
+  - `world/state_snapshots.jsonl`
+  - `world/diagnostics/*.md|json`
+- 支持多 provider / 多 model 路由：
+  - `llm_registry.json`
+  - OpenClaw 配置复用
+  - world actor 级别 `llm_selector`
+- 增强 world preset 与 eval 体系：
+  - `backend/evals/world_runtime_presets.json`
+  - `backend/evals/world_model_eval_*.json`
+  - `backend/evals/world_case_sets/*.json`
 
-- **于宏观**：我们是决策者的预演实验室，让政策与公关在零风险中试错
-- **于微观**：我们是个人用户的创意沙盘，无论是推演小说结局还是探索脑洞，皆可有趣、好玩、触手可及
+## 适合什么场景
 
-从严肃预测到趣味仿真，我们让每一个如果都能看见结果，让预测万物成为可能。
+- 世界观推进
+- 长篇剧情沙盘
+- 群像角色博弈
+- 架空政治 / 地缘 / 舆情推演
+- 有状态、可续跑、可复盘的长期模拟
 
-## 🌐 在线体验
+## Showcase
 
-欢迎访问在线 Demo 演示环境，体验我们为你准备的一次关于热点舆情事件的推演预测：[mirofish-live-demo](https://666ghj.github.io/mirofish-demo/)
+详细案例见：[docs/showcases/world-mode-runs.md](./docs/showcases/world-mode-runs.md)
 
-## 📸 系统截图
+当前这个 fork 已经沉淀了两类代表性案例：
 
-<div align="center">
-<table>
-<tr>
-<td><img src="./static/image/Screenshot/运行截图1.png" alt="截图1" width="100%"/></td>
-<td><img src="./static/image/Screenshot/运行截图2.png" alt="截图2" width="100%"/></td>
-</tr>
-<tr>
-<td><img src="./static/image/Screenshot/运行截图3.png" alt="截图3" width="100%"/></td>
-<td><img src="./static/image/Screenshot/运行截图4.png" alt="截图4" width="100%"/></td>
-</tr>
-<tr>
-<td><img src="./static/image/Screenshot/运行截图5.png" alt="截图5" width="100%"/></td>
-<td><img src="./static/image/Screenshot/运行截图6.png" alt="截图6" width="100%"/></td>
-</tr>
-</table>
-</div>
+| Case | 日期 | 规模 | 结果 |
+|------|------|------|------|
+| `sim_8ac60f042d62` | 2026-03-21 | 240 ticks | 长程 world run 完成，`3594` 条 action log，`142` 个 accepted intents，`0` 次 resolver salvage |
+| `sim_world_supervised_smoke_20260321_172346` | 2026-03-21 | 2 ticks | operator 路径 smoke 完成，`run_state / checkpoint / status` 三链路一致 |
 
-## 🎬 演示视频
+这两个 showcase 的意义不同：
 
-### 1. 武汉大学舆情推演预测 + MiroFish项目讲解
+- `sim_8ac60f042d62` 证明世界可以长时间推进，而不是只能做一次性 demo
+- `sim_world_supervised_smoke_20260321_172346` 证明 operator 路径不是“能跑但不可观测”，而是中途可看、终态可对账、诊断可导出
 
-<div align="center">
-<a href="https://www.bilibili.com/video/BV1VYBsBHEMY/" target="_blank"><img src="./static/image/武大模拟演示封面.png" alt="MiroFish Demo Video" width="75%"/></a>
+## 当前推荐策略
 
-点击图片查看使用微舆BettaFish生成的《武大舆情报告》进行预测的完整演示视频
-</div>
+这轮 eval 之后，建议把 world runtime 默认分成两类策略：
 
-### 2. 《红楼梦》失传结局推演预测
+| Preset | Actor | Resolver | 适用场景 |
+|--------|-------|----------|----------|
+| `recommended_throughput` | `eval_aliyun_qwen35_flash` | `eval_aliyun_qwen35_plus` | 默认吞吐优先，适合常规推进 |
+| `recommended_stable` | `eval_aliyun_qwen35_flash` | `eval_litellm_gpt54_deep` | 稳定 / 可解释性优先，适合关键 run |
+| `smoke_benchmark_minimax` | `eval_aliyun_qwen35_flash` | MiniMax smoke resolver | 仅适合烟测与 triage，不建议直接做长期默认 |
 
-<div align="center">
-<a href="https://www.bilibili.com/video/BV1cPk3BBExq" target="_blank"><img src="./static/image/红楼梦模拟推演封面.jpg" alt="MiroFish Demo Video" width="75%"/></a>
+对应文件：
 
-点击图片查看基于《红楼梦》前80回数十万字，MiroFish深度预测失传结局
-</div>
+- [backend/evals/world_runtime_presets.json](./backend/evals/world_runtime_presets.json)
+- [backend/evals/README.md](./backend/evals/README.md)
+- [backend/evals/world_model_eval_playbook.md](./backend/evals/world_model_eval_playbook.md)
 
-> **金融方向推演预测**、**时政要闻推演预测**等示例陆续更新中...
+## 快速开始
 
-## 🔄 工作流程
+### 1. 环境要求
 
-1. **图谱构建**：现实种子提取 & 个体与群体记忆注入 & GraphRAG构建
-2. **环境搭建**：按模式生成不同运行时。社交模式会产出 Twitter/Reddit Agent；世界模式会产出世界实体卡、推进规则与剧情线程
-3. **开始模拟**：社交模式执行双平台并行扩散；世界模式执行 world event 推进与多轮演化
-4. **报告生成**：ReportAgent拥有丰富的工具集与模拟后环境进行深度交互
-5. **深度互动**：社交模式支持采访个体 + ReportAgent；世界模式默认仅保留 ReportAgent，对事件日志、图谱与报告上下文进行追问
+| 工具 | 版本要求 |
+|------|----------|
+| Node.js | `18+` |
+| Python | `>=3.11` |
+| uv | 最新版 |
 
-## 🚀 快速开始
-
-### 一、源码部署（推荐）
-
-#### 前置要求
-
-| 工具 | 版本要求 | 说明 | 安装检查 |
-|------|---------|------|---------|
-| **Node.js** | 18+ | 前端运行环境，包含 npm | `node -v` |
-| **Python** | ≥3.11, ≤3.12 | 后端运行环境 | `python --version` |
-| **uv** | 最新版 | Python 包管理器 | `uv --version` |
-
-#### 1. 配置环境变量
+### 2. 配置环境变量
 
 ```bash
-# 复制示例配置文件
 cp .env.example .env
-
-# 编辑 .env 文件，填入必要的 API 密钥
+cp llm_registry.json.example llm_registry.json
 ```
 
-**推荐配置方式：**
+建议优先使用 OpenClaw + `llm_registry.json` 作为 provider / model 的统一管理方式。
 
-优先把 OpenClaw 当作 provider / model 的统一来源，再用项目根目录的 `llm_registry.json` 管理 route、speed mode、reasoning effort。
-仓库中提供了 `llm_registry.json.example` 作为模板，本地可复制为 `llm_registry.json` 后编辑。
-
-**`.env` 中至少需要保留：**
+最小配置建议：
 
 ```env
-# registry 来源与路径（推荐）
 LLM_REGISTRY_SOURCE=auto
 LLM_REGISTRY_PATH=/absolute/path/to/MiroFish/llm_registry.json
 OPENCLAW_CONFIG_PATH=/Users/<you>/.openclaw/openclaw.json
 
-# LLM API配置（legacy fallback；仅在 OpenClaw / registry 都未命中时回退）
-LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_MODEL_NAME=gpt-5.4
-
-# 可选第二 provider（给并发 agent / parallel simulation 用）
-LLM_BOOST_API_KEY=
-LLM_BOOST_BASE_URL=
-LLM_BOOST_MODEL_NAME=
-
-# Zep Cloud 配置
-# 每月免费额度即可支撑简单使用：https://app.getzep.com/
+# 当前后端默认依赖 Zep Cloud
 ZEP_API_KEY=your_zep_api_key
+
+# legacy fallback，仅在 registry / OpenClaw 都未命中时回退
+LLM_API_KEY=
+LLM_BASE_URL=
+LLM_MODEL_NAME=
 ```
 
-`llm_registry.json` 现在支持：
-- 多个 provider / 多个 profile
-- 按 route 为不同 agent / 服务分配模型
-- world actor 通过 `llm_selector` 做单 agent 级别选模
-- 直接复用 OpenClaw 的模型目录：
-  - `openclaw_agent`: 复用 OpenClaw 某个 agent 的主模型
-  - `openclaw_model`: 直接写 `provider/model`
-  - `openclaw_alias`: 复用 OpenClaw `agents.defaults.models.*.alias`
+说明：
 
-解析优先级：
-- 显式 `openclaw:` selector
-- `llm_registry.json`
-- OpenClaw 默认模型 / 同名 agent
-- 旧 `LLM_* / WORLD_*_LLM_*`
+- `ZEP_API_KEY` 目前仍是这个项目运行链路的一部分
+- `llm_registry.json` 支持多 provider、多 profile、多 route
+- world actor 可以通过 `llm_selector` 做单 agent 级别选模
+- 可以直接复用 OpenClaw 的模型配置，而不是把所有 model 写死在 `.env`
 
-注意：
-- 当前 MiroFish 后端仍使用 OpenAI SDK，因此只能直接复用 OpenAI 兼容协议的 OpenClaw provider。
-- 如果没有配置 `llm_registry.json`，系统仍可直接从 `OPENCLAW_CONFIG_PATH` 读取默认模型。
-
-#### 2. 安装依赖
+### 3. 安装依赖
 
 ```bash
-# 一键安装所有依赖（根目录 + 前端 + 后端）
 npm run setup:all
 ```
 
-或者分步安装：
+如果你只关心 backend / CLI world run：
 
 ```bash
-# 安装 Node 依赖（根目录 + 前端）
-npm run setup
-
-# 安装 Python 依赖（后端，自动创建虚拟环境）
 npm run setup:backend
 ```
 
-#### 3. 启动服务
+### 4. 启动前后端
 
 ```bash
-# 同时启动前后端（在项目根目录执行）
 npm run dev
 ```
 
-**服务地址：**
+默认地址：
+
 - 前端：`http://localhost:3000`
-- 后端 API：`http://localhost:5001`
+- 后端：`http://localhost:5001`
 
-#### 4. 使用模式
+### 5. 从 UI 准备 world simulation
 
-- **社交模式（Social）**：上传新闻、政策、舆情材料，输入“会如何扩散/演变”的问题，系统会生成 Twitter/Reddit 双平台 Agent 并支持后续个体访谈。
-- **世界模式（World）**：上传世界观设定、角色小传、剧情纲要或规则文档，输入“给定世界观后如何自动推进”的需求，系统会生成 world runtime、推进轮次与事件流，并在 Step 4/5 通过 ReportAgent 做分析与追问。
-- **当前限制**：世界模式不启用实时角色采访环境，深度互动阶段默认走 ReportAgent。
+基本流程：
 
-**单独启动：**
+1. 上传世界观资料 / 角色卡 / 剧情资料
+2. 选择 `World Mode`
+3. 让系统生成 `simulation_config.json`
+4. 通过 UI 直接运行，或切换到 CLI/operator 路径继续控制
 
-```bash
-npm run backend   # 仅启动后端
-npm run frontend  # 仅启动前端
-```
+## World CLI / Operator 工作流
 
-### 二、Docker 部署
+如果你已经有一个准备好的 `simulation_config.json`，可以直接用 operator CLI 跑：
 
 ```bash
-# 1. 配置环境变量（同源码部署）
-cp .env.example .env
+cd backend
 
-# 2. 拉取镜像并启动
-docker compose up -d
+./.venv/bin/python scripts/world_run.py run \
+  --config /absolute/path/to/simulation_config.json \
+  --max-rounds 8
 ```
 
-默认会读取根目录下的 `.env`，并映射端口 `3000（前端）/5001（后端）`
+续跑：
 
-> 在 `docker-compose.yml` 中已通过注释提供加速镜像地址，可按需替换
+```bash
+./.venv/bin/python scripts/world_run.py resume \
+  --config /absolute/path/to/simulation_config.json \
+  --max-rounds 16
+```
 
-## 📬 更多交流
+查看状态：
 
-<div align="center">
-<img src="./static/image/QQ群.png" alt="QQ交流群" width="60%"/>
-</div>
+```bash
+./.venv/bin/python scripts/world_run.py status \
+  --config /absolute/path/to/simulation_config.json
+```
 
-&nbsp;
+生成诊断：
 
-MiroFish团队长期招募全职/实习，如果你对多Agent应用感兴趣，欢迎投递简历至：**mirofish@shanda.com**
+```bash
+./.venv/bin/python scripts/world_run_diagnostics.py \
+  --simulation-id <simulation_id> \
+  --label run16
+```
 
-## 📄 致谢
+生成报告：
 
-**MiroFish 得到了盛大集团的战略支持和孵化！**
+```bash
+./.venv/bin/python scripts/world_run.py finalize \
+  --simulation-id <simulation_id> \
+  --label final16
+```
 
-MiroFish 的仿真引擎由 **[OASIS](https://github.com/camel-ai/oasis)** 驱动，我们衷心感谢 CAMEL-AI 团队的开源贡献！
+8 -> 16 的 staged run：
 
-## 📈 项目统计
+```bash
+./.venv/bin/python scripts/world_run.py staged \
+  --simulation-id <simulation_id> \
+  --stage1-rounds 8 \
+  --final-rounds 16
+```
 
-<a href="https://www.star-history.com/#666ghj/MiroFish&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&legend=top-left" />
- </picture>
-</a>
+### 运行态观测的一个重要细节
+
+这个 fork 里：
+
+- `run_state.json` 用来表达“服务/UI 侧看到的 live state”
+- `checkpoint.json` 用来表达“最后一个已提交 tick 的权威落点”
+
+所以在 tick 正在执行时，`run_state` 可能会比 `checkpoint` 更靠前。  
+这不是 bug，而是刻意设计：
+
+- `checkpoint` 保持提交边界清晰
+- `run_state` 保持 operator / UI 的过程可观测
+
+终态完成后，两者会被自动对齐。
+
+## 模型路由与配置
+
+这个 fork 不推荐只靠单组 `LLM_API_KEY / LLM_MODEL_NAME` 暴力驱动全部 agent。
+
+推荐方式：
+
+1. 用 `llm_registry.json` 维护 providers / profiles / routes
+2. 用 OpenClaw 作为模型配置的统一来源
+3. world runtime 通过 preset 和 selector 做职责分层
+
+你可以从这里开始看：
+
+- [llm_registry.json.example](./llm_registry.json.example)
+- [backend/evals/world_runtime_presets.json](./backend/evals/world_runtime_presets.json)
+- [backend/app/services/world_preset_registry.py](./backend/app/services/world_preset_registry.py)
+
+## Eval 体系
+
+这个 fork 不是“凭感觉换模型”，而是尽量把 world strategy 评估沉淀成可复跑资产。
+
+相关入口：
+
+- [backend/evals/README.md](./backend/evals/README.md)
+- [backend/evals/world_model_eval_playbook.md](./backend/evals/world_model_eval_playbook.md)
+- [backend/evals/world_case_sets/README.md](./backend/evals/world_case_sets/README.md)
+
+核心脚本：
+
+- [backend/scripts/eval_world_models.py](./backend/scripts/eval_world_models.py)
+- [backend/scripts/run_world_model_eval_campaign.py](./backend/scripts/run_world_model_eval_campaign.py)
+- [backend/scripts/run_world_model_eval_stage.py](./backend/scripts/run_world_model_eval_stage.py)
+- [backend/scripts/eval_world_strategy.py](./backend/scripts/eval_world_strategy.py)
+
+## 仓库结构
+
+```text
+MiroFish/
+├── backend/
+│   ├── app/
+│   ├── evals/
+│   ├── scripts/
+│   └── uploads/
+├── frontend/
+├── docs/
+│   └── showcases/
+├── llm_registry.json.example
+├── README.md
+└── README-EN.md
+```
+
+你最常会用到的目录：
+
+- `backend/scripts/`：world run / diagnostics / report / eval 脚本
+- `backend/evals/`：preset、eval suite、playbook、case sets
+- `backend/uploads/simulations/`：实际运行产物
+- `docs/showcases/`：可直接放到 GitHub 上看的 showcase 文档
+
+## 当前已知边界
+
+- world mode 的深度互动仍以 `ReportAgent` 为主，而不是实时角色采访
+- tick 级 checkpoint 只在提交点写盘，因此中途态主要看 `run_state.json`
+- world runtime 的质量仍显著受 provider 可用性与模型结构化输出能力影响
+- 这个 fork 已经把“为什么出问题、问题落在哪、如何复跑定位”做成了 diagnostics / eval / playbook，但它仍不是零运维成本系统
+
+## Upstream 与致谢
+
+- 上游项目：[`666ghj/MiroFish`](https://github.com/666ghj/MiroFish)
+- 原始仿真引擎：[`camel-ai/oasis`](https://github.com/camel-ai/oasis)
+
+感谢 upstream 作者把基础框架开源出来。  
+这个 fork 的目标不是抹掉 upstream，而是在保留关系与协议的前提下，把 world simulation 这条线继续向前推进。
+
+## License
+
+本仓库沿用上游协议：`AGPL-3.0`

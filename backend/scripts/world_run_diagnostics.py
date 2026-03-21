@@ -241,7 +241,7 @@ def validate_summary(summary: Dict[str, Any]) -> List[str]:
 
     checkpoint = summary.get("checkpoint") or {}
     checkpoint_status = str(checkpoint.get("status") or "").strip().lower()
-    if checkpoint_status not in {"running", "completed", "restored"}:
+    if checkpoint_status not in {"running", "completed", "restored", "failed", "interrupted"}:
         errors.append(f"unexpected checkpoint.status: {checkpoint.get('status')}")
     if _safe_int(checkpoint.get("last_completed_tick"), 0) <= 0:
         errors.append("checkpoint.last_completed_tick must be > 0")

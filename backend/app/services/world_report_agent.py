@@ -27,6 +27,10 @@ logger = get_logger("mirofish.world_report_agent")
 WORLD_REPORT_LLM_TIMEOUT_SECONDS = 90.0
 
 
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 class WorldReportAgent:
     def __init__(
         self,
@@ -162,6 +166,7 @@ class WorldReportAgent:
         config_path = os.path.join(sim_dir, "simulation_config.json")
         state_path = os.path.join(sim_dir, "world", "world_state.json")
         actions_path = os.path.join(sim_dir, "world", "actions.jsonl")
+        snapshots_path = os.path.join(sim_dir, "world", "state_snapshots.jsonl")
 
         config = {}
         if os.path.exists(config_path):
@@ -172,8 +177,11 @@ class WorldReportAgent:
         if os.path.exists(state_path):
             with open(state_path, "r", encoding="utf-8") as f:
                 world_state = json.load(f)
+        if isinstance(world_state, dict) and isinstance(world_state.get("world_state"), dict):
+            world_state = world_state.get("world_state") or {}
 
         actions = []
+        lifecycle_events = []
         if os.path.exists(actions_path):
             with open(actions_path, "r", encoding="utf-8") as f:
                 for line in f:
@@ -184,20 +192,164 @@ class WorldReportAgent:
                         payload = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if not payload.get("action_type"):
+                    if payload.get("action_type"):
+                        actions.append(payload)
+                    if payload.get("event_type"):
+                        lifecycle_events.append(payload)
+
+        snapshots = []
+        if os.path.exists(snapshots_path):
+            with open(snapshots_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
                         continue
-                    actions.append(payload)
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict):
+                        snapshots.append(payload)
 
         action_types = Counter(action.get("action_type", "UNKNOWN") for action in actions)
         top_actors = Counter(action.get("agent_name", "Unknown") for action in actions)
+        tick_summaries = [
+            {
+                "tick": payload.get("tick") or payload.get("round"),
+                "summary": _clean_text(payload.get("summary")),
+                "active_events_count": payload.get("active_events_count"),
+                "queued_events_count": payload.get("queued_events_count"),
+                "completed_events_count": payload.get("completed_events_count"),
+                "scene_title": payload.get("scene_title"),
+            }
+            for payload in lifecycle_events
+            if str(payload.get("event_type") or "").strip().lower() == "tick_end"
+        ]
+        final_event = next(
+            (
+                payload
+                for payload in reversed(lifecycle_events)
+                if str(payload.get("event_type") or "").strip().lower() == "simulation_end"
+            ),
+            {},
+        )
+        recent_completed_events = [
+            {
+                "tick": payload.get("tick") or payload.get("round"),
+                "actor": payload.get("agent_name"),
+                "title": payload.get("title"),
+                "summary": payload.get("summary") or payload.get("result"),
+            }
+            for payload in actions
+            if str(payload.get("action_type") or "").strip().upper() == "EVENT_COMPLETED"
+        ]
+        recent_started_events = [
+            {
+                "tick": payload.get("tick") or payload.get("round"),
+                "actor": payload.get("agent_name"),
+                "title": payload.get("title"),
+                "summary": payload.get("summary") or payload.get("result"),
+            }
+            for payload in actions
+            if str(payload.get("action_type") or "").strip().upper() in {"EVENT_STARTED", "EVENT_QUEUED"}
+        ]
         return {
             "config": config,
             "world_state": world_state,
             "actions": actions,
+            "lifecycle_events": lifecycle_events,
+            "snapshots": snapshots,
             "total_actions": len(actions),
             "action_types": dict(action_types.most_common(8)),
             "top_actors": dict(top_actors.most_common(6)),
+            "tick_summaries": tick_summaries,
+            "final_event": final_event if isinstance(final_event, dict) else {},
+            "recent_completed_events": recent_completed_events,
+            "recent_started_events": recent_started_events,
         }
+
+    def _sample_items(self, items: List[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
+        if len(items) <= count:
+            return list(items)
+        if count <= 0:
+            return []
+        indexes = sorted({int(round(i * (len(items) - 1) / max(count - 1, 1))) for i in range(count)})
+        return [items[index] for index in indexes]
+
+    def _section_lens(self, section_title: str) -> str:
+        lowered = _clean_text(section_title)
+        if any(token in lowered for token in ("起点", "驱动", "矛盾")):
+            return "foundation"
+        if any(token in lowered for token in ("轨迹", "事件链", "推进")):
+            return "trajectory"
+        if any(token in lowered for token in ("角色", "势力", "变化")):
+            return "actors"
+        return "risks"
+
+    def _build_section_payload(self, section_title: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        lens = self._section_lens(section_title)
+        config = context.get("config", {}) or {}
+        world_state = context.get("world_state", {}) or {}
+        tick_summaries = context.get("tick_summaries", []) or []
+        snapshots = context.get("snapshots", []) or []
+        final_event = context.get("final_event", {}) or {}
+        recent_completed_events = context.get("recent_completed_events", []) or []
+        recent_started_events = context.get("recent_started_events", []) or []
+
+        early_ticks = tick_summaries[:3]
+        middle_ticks = self._sample_items(tick_summaries[1:-1], 3) if len(tick_summaries) > 4 else tick_summaries[1:-1]
+        late_ticks = tick_summaries[-4:]
+
+        payload: Dict[str, Any] = {
+            "lens": lens,
+            "simulation_requirement": self.simulation_requirement,
+            "starting_condition": (
+                world_state.get("starting_condition")
+                or config.get("initial_world_state", {}).get("starting_condition")
+            ),
+            "focus_threads": world_state.get("focus_threads") or [],
+            "final_world_state": {
+                "tension": world_state.get("tension") or (final_event.get("world_state") or {}).get("tension"),
+                "stability": world_state.get("stability") or (final_event.get("world_state") or {}).get("stability"),
+                "momentum": world_state.get("momentum") or (final_event.get("world_state") or {}).get("momentum"),
+                "pressure_tracks": world_state.get("pressure_tracks") or (final_event.get("world_state") or {}).get("pressure_tracks") or {},
+                "last_tick_summary": world_state.get("last_tick_summary") or (final_event.get("world_state") or {}).get("last_tick_summary"),
+            },
+            "top_actors": context.get("top_actors", {}),
+        }
+
+        if lens == "foundation":
+            payload["tick_samples"] = early_ticks
+            payload["initial_pressure_tracks"] = config.get("pressure_tracks", [])[:6]
+            payload["opening_completed_events"] = recent_completed_events[:5]
+        elif lens == "trajectory":
+            payload["tick_windows"] = {
+                "early": early_ticks,
+                "middle": middle_ticks,
+                "late": late_ticks,
+            }
+            payload["trajectory_events"] = self._sample_items(recent_completed_events, 8)
+            payload["snapshot_samples"] = [
+                {
+                    "tick": item.get("tick") or item.get("round"),
+                    "summary": item.get("summary"),
+                    "metrics": item.get("metrics", {}),
+                }
+                for item in self._sample_items(snapshots, 6)
+            ]
+        elif lens == "actors":
+            payload["latest_completed_events"] = recent_completed_events[-8:]
+            payload["latest_started_events"] = recent_started_events[-8:]
+            payload["late_tick_samples"] = late_ticks
+        else:
+            payload["late_tick_samples"] = late_ticks
+            payload["unresolved_events"] = (final_event.get("unresolved_events") or [])[:8]
+            payload["active_events_count"] = final_event.get("active_events_count")
+            payload["queued_events_count"] = final_event.get("queued_events_count")
+            payload["completed_events_count"] = final_event.get("completed_events_count")
+            payload["latest_completed_events"] = recent_completed_events[-5:]
+
+        return payload
 
     def _build_outline(self, context: Dict[str, Any]) -> ReportOutline:
         default_outline = ReportOutline(
@@ -258,26 +410,10 @@ class WorldReportAgent:
         return default_outline
 
     def _build_section_content(self, section_title: str, context: Dict[str, Any]) -> str:
-        actions = context.get("actions", [])
-        snippets = [
-            {
-                "round": action.get("round"),
-                "actor": action.get("agent_name"),
-                "type": action.get("action_type"),
-                "content": (
-                    action.get("result")
-                    or action.get("summary")
-                    or action.get("title")
-                    or action.get("action_args", {}).get("summary")
-                    or action.get("action_args", {}).get("objective")
-                    or ""
-                ),
-            }
-            for action in actions[:20]
-        ]
+        payload = self._build_section_payload(section_title, context)
 
         if not self.llm:
-            return self._fallback_section_content(section_title, context, snippets)
+            return self._fallback_section_content(section_title, context, payload)
 
         try:
             response = self.llm.chat(
@@ -287,6 +423,8 @@ class WorldReportAgent:
                         "content": (
                             "你在撰写世界观自动推进报告的单章内容。"
                             "输出中文 markdown，聚焦具体事件、角色变化和下一阶段含义。"
+                            "不要重复其它章节，不要只复述 Tick 1。"
+                            "必须基于 section_payload 的视角写出这一章。"
                         ),
                     },
                     {
@@ -294,11 +432,7 @@ class WorldReportAgent:
                         "content": json.dumps(
                             {
                                 "section_title": section_title,
-                                "simulation_requirement": self.simulation_requirement,
-                                "world_state": context.get("world_state", {}),
-                                "action_types": context.get("action_types", {}),
-                                "top_actors": context.get("top_actors", {}),
-                                "event_snippets": snippets,
+                                "section_payload": payload,
                             },
                             ensure_ascii=False,
                         ),
@@ -313,31 +447,93 @@ class WorldReportAgent:
         except Exception as exc:
             logger.warning(f"World section generation fallback: {exc}")
 
-        return self._fallback_section_content(section_title, context, snippets)
+        return self._fallback_section_content(section_title, context, payload)
 
     def _fallback_section_content(
         self,
         section_title: str,
         context: Dict[str, Any],
-        snippets: List[Dict[str, Any]],
+        payload: Dict[str, Any],
     ) -> str:
         lines = [f"本章节围绕“{section_title}”整理 world 模式的推进结果。", ""]
-        if context.get("world_state", {}).get("core_tensions"):
-            lines.append("**核心矛盾**")
-            for item in context["world_state"]["core_tensions"][:4]:
+        lens = payload.get("lens")
+        if payload.get("starting_condition"):
+            lines.append(f"起点条件：{payload['starting_condition']}")
+            lines.append("")
+        if payload.get("focus_threads"):
+            lines.append("**主线焦点**")
+            for item in payload["focus_threads"][:6]:
                 lines.append(f"- {item}")
             lines.append("")
-        if context.get("top_actors"):
-            lines.append("**高活跃实体**")
-            for name, count in context["top_actors"].items():
-                lines.append(f"- {name}: {count} 次关键行动")
-            lines.append("")
-        if snippets:
-            lines.append("**代表性事件**")
-            for snippet in snippets[:5]:
+
+        if lens == "foundation":
+            lines.append("**开局样本**")
+            for item in payload.get("tick_samples", [])[:4]:
                 lines.append(
-                    f"- Tick {snippet['round']}: {snippet['actor']} / {snippet['type']} / {snippet['content']}"
+                    f"- Tick {item.get('tick')}: {item.get('summary')}"
                 )
+            if payload.get("opening_completed_events"):
+                lines.append("")
+                lines.append("**最早落地的动作**")
+                for item in payload["opening_completed_events"][:5]:
+                    lines.append(
+                        f"- Tick {item.get('tick')}: {item.get('actor')} / {item.get('title')} / {item.get('summary')}"
+                    )
+        elif lens == "trajectory":
+            lines.append("**阶段推进**")
+            for label, items in payload.get("tick_windows", {}).items():
+                if not items:
+                    continue
+                lines.append(f"- {label}: " + " | ".join(
+                    f"Tick {item.get('tick')} {item.get('summary')}" for item in items[:3]
+                ))
+            if payload.get("trajectory_events"):
+                lines.append("")
+                lines.append("**关键事件链**")
+                for item in payload["trajectory_events"][:8]:
+                    lines.append(
+                        f"- Tick {item.get('tick')}: {item.get('actor')} / {item.get('title')} / {item.get('summary')}"
+                    )
+        elif lens == "actors":
+            if context.get("top_actors"):
+                lines.append("**高活跃实体**")
+                for name, count in context["top_actors"].items():
+                    lines.append(f"- {name}: {count} 次关键行动")
+                lines.append("")
+            lines.append("**近期势力动作**")
+            for item in payload.get("latest_completed_events", [])[:8]:
+                lines.append(
+                    f"- Tick {item.get('tick')}: {item.get('actor')} / {item.get('title')} / {item.get('summary')}"
+                )
+            if payload.get("late_tick_samples"):
+                lines.append("")
+                lines.append("**晚期局势信号**")
+                for item in payload["late_tick_samples"][:4]:
+                    lines.append(f"- Tick {item.get('tick')}: {item.get('summary')}")
+        else:
+            final_world_state = payload.get("final_world_state", {})
+            lines.append("**最终态势**")
+            lines.append(
+                f"- tension={final_world_state.get('tension')}, "
+                f"stability={final_world_state.get('stability')}, "
+                f"momentum={final_world_state.get('momentum')}"
+            )
+            if final_world_state.get("last_tick_summary"):
+                lines.append(f"- 最后一轮摘要: {final_world_state.get('last_tick_summary')}")
+            if payload.get("unresolved_events"):
+                lines.append("")
+                lines.append("**未收束风险**")
+                for item in payload["unresolved_events"][:6]:
+                    lines.append(
+                        f"- {item.get('title')}: {item.get('summary')}"
+                    )
+            if payload.get("latest_completed_events"):
+                lines.append("")
+                lines.append("**临近终局的已落地动作**")
+                for item in payload["latest_completed_events"][:5]:
+                    lines.append(
+                        f"- Tick {item.get('tick')}: {item.get('actor')} / {item.get('title')} / {item.get('summary')}"
+                    )
         return "\n".join(lines).strip()
 
     def _answer_question(

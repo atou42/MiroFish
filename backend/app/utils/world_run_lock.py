@@ -33,6 +33,7 @@ class WorldRunPaths:
     lock_path: str
     pid_path: str
     lease_path: str
+    stop_request_path: str
 
 
 def world_run_paths_for_simulation_dir(simulation_dir: str) -> WorldRunPaths:
@@ -44,6 +45,7 @@ def world_run_paths_for_simulation_dir(simulation_dir: str) -> WorldRunPaths:
         lock_path=os.path.join(world_dir, ".run.lock"),
         pid_path=os.path.join(world_dir, "run.pid"),
         lease_path=os.path.join(world_dir, "run.lease.json"),
+        stop_request_path=os.path.join(world_dir, "stop.request.json"),
     )
 
 

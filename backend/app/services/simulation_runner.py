@@ -158,6 +158,8 @@ class SimulationRunState:
     
     # 错误信息
     error: Optional[str] = None
+    terminal_status: str = ""
+    stop_reason: str = ""
     
     # 进程ID（用于停止）
     process_pid: Optional[int] = None
@@ -359,6 +361,8 @@ class SimulationRunState:
             "updated_at": self.updated_at,
             "completed_at": self.completed_at,
             "error": self.error,
+            "terminal_status": self.terminal_status,
+            "stop_reason": self.stop_reason,
             "process_pid": self.process_pid,
         }
     
@@ -412,13 +416,33 @@ class SimulationRunner:
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
         """获取运行状态"""
         if simulation_id in cls._run_states:
-            return cls._run_states[simulation_id]
+            state = cls._run_states[simulation_id]
+            if (
+                SimulationMode.normalize(state.simulation_mode).value == SimulationMode.WORLD.value
+                and not cls._has_live_process(simulation_id)
+            ):
+                refreshed = cls.refresh_world_run_state_from_artifacts(simulation_id, persist=True)
+                if refreshed:
+                    return refreshed
+            return cls._reconcile_world_run_state(simulation_id, state, persist=True)
         
         # 尝试从文件加载
         state = cls._load_run_state(simulation_id)
         if state:
             cls._run_states[simulation_id] = state
-        return state
+            if (
+                SimulationMode.normalize(state.simulation_mode).value == SimulationMode.WORLD.value
+                and not cls._has_live_process(simulation_id)
+            ):
+                refreshed = cls.refresh_world_run_state_from_artifacts(simulation_id, persist=True)
+                if refreshed:
+                    return refreshed
+            return cls._reconcile_world_run_state(simulation_id, state, persist=True)
+
+        refreshed = cls.refresh_world_run_state_from_artifacts(simulation_id, persist=True)
+        if refreshed:
+            return refreshed
+        return None
     
     @classmethod
     def _load_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
@@ -457,6 +481,8 @@ class SimulationRunner:
                 updated_at=data.get("updated_at", datetime.now().isoformat()),
                 completed_at=data.get("completed_at"),
                 error=data.get("error"),
+                terminal_status=data.get("terminal_status", ""),
+                stop_reason=data.get("stop_reason", ""),
                 process_pid=data.get("process_pid"),
                 world_recent_events=data.get("world_recent_events", []),
                 world_active_events=data.get("world_active_events", []),
@@ -581,8 +607,11 @@ class SimulationRunner:
         return {
             "checkpoint_available": True,
             "checkpoint_path": cls._world_checkpoint_path(simulation_id),
+            "config_path": payload.get("config_path") or "",
             "saved_at": payload.get("saved_at"),
             "status": payload.get("status") or "running",
+            "terminal_status": payload.get("terminal_status") or "",
+            "stop_reason": payload.get("stop_reason") or "",
             "last_completed_tick": last_completed_tick,
             "run_total_rounds": run_total_rounds,
             "minutes_per_round": minutes_per_round,
@@ -592,6 +621,429 @@ class SimulationRunner:
             "queued_events": queued_events if isinstance(queued_events, list) else [],
             "completed_events_count": len(completed_events) if isinstance(completed_events, list) else 0,
         }
+
+    @classmethod
+    def _load_simulation_config(
+        cls,
+        simulation_id: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        config_path = os.path.join(cls.RUN_STATE_DIR, simulation_id, "simulation_config.json")
+        if not os.path.exists(config_path):
+            return config_path, {}
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as e:
+            logger.warning(f"读取模拟配置失败: {simulation_id}, error={e}")
+            return config_path, {}
+        return config_path, payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _read_world_start_event(cls, sim_dir: str) -> Dict[str, Any]:
+        actions_log = os.path.join(sim_dir, "world", "actions.jsonl")
+        if not os.path.exists(actions_log):
+            return {}
+
+        try:
+            with open(actions_log, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if str(payload.get("event_type") or "").strip().lower() == "simulation_start":
+                        return payload if isinstance(payload, dict) else {}
+        except Exception as e:
+            logger.warning(f"读取 world start event 失败: {sim_dir}, error={e}")
+        return {}
+
+    @classmethod
+    def _build_world_run_state_from_artifacts(
+        cls,
+        simulation_id: str,
+        *,
+        existing_state: Optional[SimulationRunState] = None,
+        fallback_runner_status: Optional[RunnerStatus] = None,
+        process_pid: Optional[int] = None,
+    ) -> Optional[SimulationRunState]:
+        config_path, config = cls._load_simulation_config(simulation_id)
+        if config and SimulationMode.normalize(config.get("simulation_mode")).value != SimulationMode.WORLD.value:
+            return None
+
+        sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
+        world_dir = os.path.join(sim_dir, "world")
+        actions_log = os.path.join(world_dir, "actions.jsonl")
+        snapshots_log = os.path.join(world_dir, "state_snapshots.jsonl")
+        checkpoint_meta = cls.get_world_checkpoint_meta(simulation_id) or {}
+        start_event = cls._read_world_start_event(sim_dir)
+
+        existing_total_rounds = int(existing_state.total_rounds or 0) if existing_state else 0
+        checkpoint_total_rounds = int(checkpoint_meta.get("run_total_rounds", 0) or 0)
+        started_total_rounds = int(start_event.get("total_rounds", 0) or 0)
+        desired_total_rounds = max(existing_total_rounds, checkpoint_total_rounds, started_total_rounds, 0)
+
+        if config:
+            total_rounds, total_hours, _ = cls._resolve_total_rounds(
+                config,
+                max_rounds=(desired_total_rounds or None),
+                allow_world_extension=True,
+            )
+        else:
+            total_rounds = desired_total_rounds
+            minutes_per_round = int(checkpoint_meta.get("minutes_per_round", 60) or 60)
+            total_hours = math.ceil(total_rounds * minutes_per_round / 60) if total_rounds else 0
+
+        started_at = (
+            (existing_state.started_at if existing_state else "")
+            or str(start_event.get("timestamp") or "").strip()
+            or None
+        )
+        state = SimulationRunState(
+            simulation_id=simulation_id,
+            simulation_mode=SimulationMode.WORLD.value,
+            runner_status=RunnerStatus.IDLE,
+            total_rounds=total_rounds,
+            total_simulation_hours=total_hours,
+            started_at=started_at,
+        )
+
+        if existing_state and existing_state.completed_at:
+            state.completed_at = existing_state.completed_at
+
+        if os.path.exists(actions_log):
+            cls._read_action_log(actions_log, 0, state, "world")
+        if os.path.exists(snapshots_log):
+            cls._read_world_snapshot_log(snapshots_log, 0, state)
+
+        if checkpoint_meta:
+            cls._apply_world_checkpoint_meta_to_state(state, checkpoint_meta)
+
+        checkpoint_status = str(checkpoint_meta.get("status") or "").strip().lower()
+        terminal_event = cls._read_world_terminal_event(sim_dir)
+        terminal_hint = str(
+            checkpoint_meta.get("saved_at")
+            or terminal_event.get("timestamp")
+            or (existing_state.completed_at if existing_state else "")
+            or ""
+        ).strip()
+
+        if fallback_runner_status is not None:
+            state.runner_status = fallback_runner_status
+            state.world_running = fallback_runner_status in {RunnerStatus.STARTING, RunnerStatus.RUNNING}
+            state.world_completed = fallback_runner_status == RunnerStatus.COMPLETED
+            state.process_pid = process_pid
+            if state.world_running and state.world_current_phase in {
+                "idle",
+                "completed",
+                "failed",
+                "interrupted",
+                "stopped",
+            }:
+                restored_phase = "running"
+                if isinstance(state.latest_snapshot, dict):
+                    restored_phase = state.latest_snapshot.get("phase") or restored_phase
+                state.world_current_phase = restored_phase
+        elif checkpoint_status in {"completed", "failed", "interrupted"} or terminal_event:
+            terminal = cls._classify_world_process_exit(
+                simulation_id,
+                None,
+                sim_dir,
+                state,
+                respect_stop_state=False,
+            )
+            cls._apply_world_terminal_to_state(
+                state,
+                terminal,
+                completed_at_hint=terminal_hint,
+            )
+        elif checkpoint_status == "running":
+            lease_config_path = str(checkpoint_meta.get("config_path") or config_path or "").strip()
+            if lease_config_path:
+                lease_status = cls._world_lease_status(simulation_id, lease_config_path)
+                if lease_status.get("alive"):
+                    state.runner_status = RunnerStatus.RUNNING
+                    state.world_running = True
+                    state.world_completed = False
+                    state.process_pid = int(lease_status.get("pid") or 0) or None
+                    if state.world_current_phase in {
+                        "idle",
+                        "completed",
+                        "failed",
+                        "interrupted",
+                        "stopped",
+                    }:
+                        restored_phase = "running"
+                        if isinstance(state.latest_snapshot, dict):
+                            restored_phase = state.latest_snapshot.get("phase") or restored_phase
+                        state.world_current_phase = restored_phase
+                else:
+                    terminal = cls._classify_world_process_exit(
+                        simulation_id,
+                        None,
+                        sim_dir,
+                        state,
+                        respect_stop_state=False,
+                    )
+                    cls._apply_world_terminal_to_state(
+                        state,
+                        terminal,
+                        completed_at_hint=terminal_hint,
+                    )
+        elif existing_state:
+            state.runner_status = existing_state.runner_status
+            state.world_running = existing_state.world_running
+            state.world_completed = existing_state.world_completed
+            state.process_pid = existing_state.process_pid
+            state.terminal_status = existing_state.terminal_status
+            state.stop_reason = existing_state.stop_reason
+            state.error = existing_state.error
+            state.world_current_phase = existing_state.world_current_phase
+
+        state.updated_at = datetime.now().isoformat()
+        return state
+
+    @classmethod
+    def refresh_world_run_state_from_artifacts(
+        cls,
+        simulation_id: str,
+        *,
+        persist: bool = True,
+        fallback_runner_status: Optional[RunnerStatus] = None,
+        process_pid: Optional[int] = None,
+    ) -> Optional[SimulationRunState]:
+        existing_state = cls._run_states.get(simulation_id)
+        if not existing_state:
+            existing_state = cls._load_run_state(simulation_id)
+
+        state = cls._build_world_run_state_from_artifacts(
+            simulation_id,
+            existing_state=existing_state,
+            fallback_runner_status=fallback_runner_status,
+            process_pid=process_pid,
+        )
+        if not state:
+            return None
+
+        if persist:
+            cls._save_run_state(state)
+        else:
+            cls._run_states[simulation_id] = state
+        return cls._reconcile_world_run_state(simulation_id, state, persist=persist)
+
+    @classmethod
+    def bootstrap_world_operator_run_state(
+        cls,
+        simulation_id: str,
+        config_path: str,
+        *,
+        max_rounds: Optional[int] = None,
+        resume_from_checkpoint: bool = False,
+        process_pid: Optional[int] = None,
+    ) -> SimulationRunState:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+
+        total_rounds, total_hours, _ = cls._resolve_total_rounds(
+            config,
+            max_rounds=max_rounds,
+            allow_world_extension=resume_from_checkpoint,
+        )
+        state = SimulationRunState(
+            simulation_id=simulation_id,
+            simulation_mode=SimulationMode.WORLD.value,
+            runner_status=RunnerStatus.RUNNING,
+            total_rounds=total_rounds,
+            total_simulation_hours=total_hours,
+            started_at=datetime.now().isoformat(),
+            process_pid=process_pid,
+        )
+        state.world_running = True
+        state.world_current_phase = "resuming" if resume_from_checkpoint else "starting"
+
+        if resume_from_checkpoint:
+            checkpoint_meta = cls.get_world_checkpoint_meta(simulation_id)
+            if checkpoint_meta:
+                state.current_round = int(checkpoint_meta.get("last_completed_tick", 0) or 0)
+                state.simulated_hours = checkpoint_meta.get("simulated_hours", 0) or 0
+                state.latest_snapshot = checkpoint_meta.get("last_snapshot") or None
+                state.world_active_events = checkpoint_meta.get("active_events") or []
+                state.world_queued_events = checkpoint_meta.get("queued_events") or []
+                state.world_completed_events_count = int(checkpoint_meta.get("completed_events_count", 0) or 0)
+
+        cls._save_run_state(state)
+        return state
+
+    @classmethod
+    def _apply_world_checkpoint_meta_to_state(
+        cls,
+        state: SimulationRunState,
+        checkpoint_meta: Dict[str, Any],
+    ) -> bool:
+        changed = False
+
+        run_total_rounds = int(checkpoint_meta.get("run_total_rounds", 0) or 0)
+        if run_total_rounds and state.total_rounds != run_total_rounds:
+            state.total_rounds = run_total_rounds
+            changed = True
+
+        minutes_per_round = int(checkpoint_meta.get("minutes_per_round", 60) or 60)
+        total_hours = math.ceil(run_total_rounds * minutes_per_round / 60) if run_total_rounds else 0
+        if total_hours and state.total_simulation_hours != total_hours:
+            state.total_simulation_hours = total_hours
+            changed = True
+
+        last_completed_tick = int(checkpoint_meta.get("last_completed_tick", 0) or 0)
+        if last_completed_tick > state.current_round:
+            state.current_round = last_completed_tick
+            changed = True
+
+        simulated_hours = checkpoint_meta.get("simulated_hours")
+        if simulated_hours is not None:
+            simulated_hours_value = float(simulated_hours)
+            if simulated_hours_value > float(state.simulated_hours or 0):
+                state.simulated_hours = simulated_hours_value
+                changed = True
+
+        last_snapshot = checkpoint_meta.get("last_snapshot") or {}
+        if isinstance(last_snapshot, dict) and last_snapshot and state.latest_snapshot != last_snapshot:
+            state.latest_snapshot = last_snapshot
+            changed = True
+
+        active_events = checkpoint_meta.get("active_events") or []
+        if state.world_active_events != active_events:
+            state.world_active_events = list(active_events)
+            changed = True
+
+        queued_events = checkpoint_meta.get("queued_events") or []
+        if state.world_queued_events != queued_events:
+            state.world_queued_events = list(queued_events)
+            changed = True
+
+        completed_events_count = int(checkpoint_meta.get("completed_events_count", 0) or 0)
+        if state.world_completed_events_count != completed_events_count:
+            state.world_completed_events_count = completed_events_count
+            changed = True
+
+        return changed
+
+    @classmethod
+    def _apply_world_terminal_to_state(
+        cls,
+        state: SimulationRunState,
+        terminal: Dict[str, Any],
+        completed_at_hint: str = "",
+    ) -> bool:
+        changed = False
+
+        runner_status = terminal.get("runner_status")
+        if runner_status and state.runner_status != runner_status:
+            state.runner_status = runner_status
+            changed = True
+
+        world_current_phase = str(terminal.get("world_current_phase") or "").strip()
+        if world_current_phase and state.world_current_phase != world_current_phase:
+            state.world_current_phase = world_current_phase
+            changed = True
+
+        terminal_status = str(terminal.get("terminal_status") or "").strip()
+        if state.terminal_status != terminal_status:
+            state.terminal_status = terminal_status
+            changed = True
+
+        stop_reason = str(terminal.get("stop_reason") or "").strip()
+        if state.stop_reason != stop_reason:
+            state.stop_reason = stop_reason
+            changed = True
+
+        error = terminal.get("error")
+        if state.error != error:
+            state.error = error
+            changed = True
+
+        if state.world_running:
+            state.world_running = False
+            changed = True
+
+        completed = runner_status == RunnerStatus.COMPLETED
+        if state.world_completed != completed:
+            state.world_completed = completed
+            changed = True
+
+        desired_completed_at = completed_at_hint or datetime.now().isoformat()
+        if runner_status in {RunnerStatus.COMPLETED, RunnerStatus.FAILED, RunnerStatus.STOPPED}:
+            if state.process_pid is not None:
+                state.process_pid = None
+                changed = True
+            if state.completed_at != desired_completed_at:
+                state.completed_at = desired_completed_at
+                changed = True
+
+        return changed
+
+    @classmethod
+    def _reconcile_world_run_state(
+        cls,
+        simulation_id: str,
+        state: Optional[SimulationRunState],
+        persist: bool = False,
+    ) -> Optional[SimulationRunState]:
+        if not state:
+            return None
+        if SimulationMode.normalize(state.simulation_mode).value != SimulationMode.WORLD.value:
+            return state
+
+        checkpoint_meta = cls.get_world_checkpoint_meta(simulation_id)
+        if not checkpoint_meta:
+            return state
+
+        changed = cls._apply_world_checkpoint_meta_to_state(state, checkpoint_meta)
+        checkpoint_status = str(checkpoint_meta.get("status") or "").strip().lower()
+
+        if checkpoint_status in {"completed", "failed", "interrupted"}:
+            terminal = cls._classify_world_process_exit(
+                simulation_id,
+                None,
+                os.path.join(cls.RUN_STATE_DIR, simulation_id),
+                state,
+                respect_stop_state=False,
+            )
+            changed = (
+                cls._apply_world_terminal_to_state(
+                    state,
+                    terminal,
+                    completed_at_hint=str(checkpoint_meta.get("saved_at") or ""),
+                )
+                or changed
+            )
+        elif checkpoint_status == "running":
+            config_path = str(checkpoint_meta.get("config_path") or "").strip()
+            if config_path:
+                lease_status = cls._world_lease_status(simulation_id, config_path)
+                if lease_status.get("alive"):
+                    if state.runner_status != RunnerStatus.RUNNING:
+                        state.runner_status = RunnerStatus.RUNNING
+                        changed = True
+                    if not state.world_running:
+                        state.world_running = True
+                        changed = True
+                    if state.world_completed:
+                        state.world_completed = False
+                        changed = True
+                    if state.world_current_phase in {"idle", "completed", "failed", "interrupted", "stopped"}:
+                        state.world_current_phase = "running"
+                        changed = True
+
+        if changed:
+            state.updated_at = datetime.now().isoformat()
+            if persist:
+                cls._save_run_state(state)
+            else:
+                cls._run_states[simulation_id] = state
+
+        return state
 
     @classmethod
     def _world_lease_status(
@@ -966,16 +1418,15 @@ class SimulationRunner:
             if os.path.exists(snapshots_log):
                 cls._read_world_snapshot_log(snapshots_log, snapshot_position, state)
 
-            if state.runner_status in {RunnerStatus.STOPPING, RunnerStatus.STOPPED}:
-                state.runner_status = RunnerStatus.STOPPED
-                state.completed_at = state.completed_at or datetime.now().isoformat()
-            elif process.returncode == 0:
-                state.runner_status = RunnerStatus.COMPLETED
-                state.completed_at = datetime.now().isoformat()
-            else:
-                state.runner_status = RunnerStatus.FAILED
-                state.error = f"进程退出码: {process.returncode}"
+            terminal = cls._classify_world_process_exit(simulation_id, process.returncode, sim_dir, state)
+            state.runner_status = terminal["runner_status"]
+            state.completed_at = state.completed_at or datetime.now().isoformat()
+            state.terminal_status = terminal.get("terminal_status", state.terminal_status)
+            state.stop_reason = terminal.get("stop_reason", state.stop_reason)
+            state.world_current_phase = terminal.get("world_current_phase", state.world_current_phase)
+            state.error = terminal.get("error") or state.error
             state.world_running = False
+            state.process_pid = None
             cls._save_run_state(state)
         except Exception as e:
             logger.error(f"world 监控线程异常: {simulation_id}, error={e}")
@@ -998,6 +1449,97 @@ class SimulationRunner:
                 except Exception:
                     pass
                 cls._stderr_files.pop(simulation_id, None)
+
+    @classmethod
+    def _read_world_terminal_event(cls, sim_dir: str) -> Dict[str, Any]:
+        actions_log = os.path.join(sim_dir, "world", "actions.jsonl")
+        terminal_types = {"simulation_end", "simulation_failed", "simulation_interrupted"}
+        last_terminal: Dict[str, Any] = {}
+        if not os.path.exists(actions_log):
+            return last_terminal
+        try:
+            with open(actions_log, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if str(payload.get("event_type") or "").strip().lower() in terminal_types:
+                        last_terminal = payload
+        except Exception as e:
+            logger.warning(f"读取 world terminal event 失败: {sim_dir}, error={e}")
+        return last_terminal
+
+    @classmethod
+    def _classify_world_process_exit(
+        cls,
+        simulation_id: str,
+        returncode: Optional[int],
+        sim_dir: str,
+        state: SimulationRunState,
+        respect_stop_state: bool = True,
+    ) -> Dict[str, Any]:
+        if respect_stop_state and state.runner_status in {RunnerStatus.STOPPING, RunnerStatus.STOPPED}:
+            return {
+                "runner_status": RunnerStatus.STOPPED,
+                "world_current_phase": "stopped",
+                "terminal_status": state.terminal_status or "stopped",
+                "stop_reason": state.stop_reason or "operator_stop_requested",
+                "error": state.error,
+            }
+
+        terminal_event = cls._read_world_terminal_event(sim_dir)
+        event_type = str(terminal_event.get("event_type") or "").strip().lower()
+        checkpoint_meta = cls.get_world_checkpoint_meta(simulation_id) or {}
+        checkpoint_status = str(checkpoint_meta.get("status") or "").strip().lower()
+        checkpoint_terminal = str(checkpoint_meta.get("terminal_status") or checkpoint_status or "").strip().lower()
+        stop_reason = str(
+            terminal_event.get("stop_reason")
+            or checkpoint_meta.get("stop_reason")
+            or state.stop_reason
+            or ""
+        ).strip()
+
+        if event_type == "simulation_end" or checkpoint_status == "completed":
+            return {
+                "runner_status": RunnerStatus.COMPLETED,
+                "world_current_phase": "completed",
+                "terminal_status": checkpoint_terminal or "completed",
+                "stop_reason": stop_reason,
+                "error": None,
+            }
+
+        if event_type in {"simulation_failed", "simulation_interrupted"} or checkpoint_status in {"failed", "interrupted"}:
+            terminal_status = checkpoint_terminal or event_type.replace("simulation_", "") or "failed"
+            error = (
+                terminal_event.get("error")
+                or terminal_event.get("summary")
+                or state.error
+                or f"world process terminated with terminal_status={terminal_status}"
+            )
+            return {
+                "runner_status": RunnerStatus.FAILED,
+                "world_current_phase": terminal_status,
+                "terminal_status": terminal_status,
+                "stop_reason": stop_reason,
+                "error": error,
+            }
+
+        error = (
+            f"world process exited without terminal marker: returncode={returncode}, "
+            f"checkpoint.status={checkpoint_status or 'unknown'}, "
+            f"last_completed_tick={checkpoint_meta.get('last_completed_tick', 0)}"
+        )
+        return {
+            "runner_status": RunnerStatus.FAILED,
+            "world_current_phase": "interrupted",
+            "terminal_status": "interrupted",
+            "stop_reason": stop_reason or "missing_terminal_marker",
+            "error": error,
+        }
 
     @classmethod
     def _read_world_snapshot_log(
@@ -1119,6 +1661,8 @@ class SimulationRunner:
             elif platform == "world":
                 state.world_completed = True
                 state.world_running = False
+                state.terminal_status = str(action_data.get("terminal_status") or "completed")
+                state.stop_reason = str(action_data.get("stop_reason") or "")
                 logger.info(
                     f"World 模拟已完成: {state.simulation_id}, total_rounds={action_data.get('total_rounds')}, total_actions={action_data.get('total_actions')}"
                 )
@@ -1132,7 +1676,19 @@ class SimulationRunner:
             if platform == "world":
                 state.world_running = False
                 state.runner_status = RunnerStatus.FAILED
+                state.world_current_phase = "failed"
+                state.terminal_status = "failed"
+                state.stop_reason = str(action_data.get("stop_reason") or "runtime_exception")
                 state.error = action_data.get("error") or action_data.get("summary") or "world simulation failed"
+            return
+        if event_type == "simulation_interrupted":
+            if platform == "world":
+                state.world_running = False
+                state.runner_status = RunnerStatus.FAILED
+                state.world_current_phase = "interrupted"
+                state.terminal_status = "interrupted"
+                state.stop_reason = str(action_data.get("stop_reason") or "interrupted")
+                state.error = action_data.get("error") or action_data.get("summary") or "world simulation interrupted"
             return
 
         round_num = action_data.get("round") or action_data.get("tick", 0)
@@ -1161,7 +1717,7 @@ class SimulationRunner:
         if platform == "world":
             if event_type in {"tick_start", "tick_end", "round_start", "round_end"} and round_num > state.current_round:
                 state.current_round = round_num
-            state.world_running = event_type not in {"simulation_end"}
+            state.world_running = event_type not in {"simulation_end", "simulation_failed", "simulation_interrupted"}
             state.add_world_event(action_data)
 
     @classmethod
@@ -1404,7 +1960,26 @@ class SimulationRunner:
         process = cls._processes.get(simulation_id)
         if process and process.poll() is None:
             try:
-                cls._terminate_process(process, simulation_id)
+                if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
+                    stop_request_path = world_run_paths_for_simulation_dir(
+                        os.path.join(cls.RUN_STATE_DIR, simulation_id)
+                    ).stop_request_path
+                    os.makedirs(os.path.dirname(stop_request_path), exist_ok=True)
+                    with open(stop_request_path, "w", encoding="utf-8") as f:
+                        json.dump(
+                            {
+                                "reason": "operator_stop_requested",
+                                "requested_at": datetime.now().isoformat(),
+                            },
+                            f,
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    deadline = time.time() + 5
+                    while process.poll() is None and time.time() < deadline:
+                        time.sleep(0.2)
+                if process.poll() is None:
+                    cls._terminate_process(process, simulation_id)
             except ProcessLookupError:
                 # 进程已经不存在
                 pass
@@ -1423,6 +1998,8 @@ class SimulationRunner:
         state.world_running = False
         if SimulationMode.normalize(state.simulation_mode) == SimulationMode.WORLD:
             state.world_current_phase = "stopped"
+            state.terminal_status = "stopped"
+            state.stop_reason = "operator_stop_requested"
         state.completed_at = datetime.now().isoformat()
         cls._save_run_state(state)
         

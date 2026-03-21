@@ -16,6 +16,7 @@ import json
 import os
 import random
 import re
+import signal
 import sys
 import time
 import traceback
@@ -548,6 +549,7 @@ class WorldEvent:
 
 class WorldSimulationRuntime:
     CHECKPOINT_SCHEMA_VERSION = 1
+    STOP_MODES = {"hard_cap", "drain_active", "drain_all"}
 
     def __init__(
         self,
@@ -559,6 +561,7 @@ class WorldSimulationRuntime:
             self.config = json.load(f)
 
         self.config_path = config_path
+        self.paths = world_run_paths_for_config(self.config_path)
         self.simulation_dir = os.path.dirname(config_path)
         self.world_dir = os.path.join(self.simulation_dir, "world")
         os.makedirs(self.world_dir, exist_ok=True)
@@ -567,6 +570,7 @@ class WorldSimulationRuntime:
         self.snapshots_log = os.path.join(self.world_dir, "state_snapshots.jsonl")
         self.world_state_path = os.path.join(self.world_dir, "world_state.json")
         self.checkpoint_path = os.path.join(self.world_dir, "checkpoint.json")
+        self.stop_request_path = os.path.join(self.world_dir, "stop.request.json")
 
         time_config = self.config.get("time_config", {})
         configured_rounds = safe_int(
@@ -583,9 +587,10 @@ class WorldSimulationRuntime:
         # new absolute target tick so long-lived worlds can be extended beyond
         # the original config horizon.
         if resume_from_checkpoint and max_rounds:
-            self.total_rounds = max_rounds
+            self.target_rounds = max_rounds
         else:
-            self.total_rounds = min(configured_rounds, max_rounds) if max_rounds else configured_rounds
+            self.target_rounds = min(configured_rounds, max_rounds) if max_rounds else configured_rounds
+        self.total_rounds = self.target_rounds
         self.minutes_per_round = safe_int(time_config.get("minutes_per_round", 60), default=60, lower=1)
         self.agent_configs = self.config.get("agent_configs", [])
         self.plot_threads = self.config.get("plot_threads", [])
@@ -717,6 +722,18 @@ class WorldSimulationRuntime:
             "actor_on_failure",
             self.runtime_policy["actor_on_failure"],
         )
+        self.stop_mode = self._runtime_str(
+            "stop_mode",
+            self.runtime_policy.get("stop_mode", "hard_cap"),
+        )
+        if self.stop_mode not in self.STOP_MODES:
+            self.stop_mode = "hard_cap"
+        self.max_drain_rounds = safe_int(
+            self.runtime_config.get("max_drain_rounds", self.runtime_policy.get("max_drain_rounds", 0)),
+            default=safe_int(self.runtime_policy.get("max_drain_rounds", 0), default=0, lower=0),
+            lower=0,
+            upper=200,
+        )
         self.resolver_salvage_on_zero_accept = self._runtime_bool(
             "resolver_salvage_on_zero_accept",
             True,
@@ -755,6 +772,9 @@ class WorldSimulationRuntime:
         self._lifecycle_records = 0
         self.last_completed_tick = 0
         self.resume_from_checkpoint = resume_from_checkpoint
+        self.stop_reason = ""
+        self.terminal_status = ""
+        self._terminal_event_written = False
 
         if self.resume_from_checkpoint:
             self._load_checkpoint()
@@ -781,10 +801,16 @@ class WorldSimulationRuntime:
             "schema_version": self.CHECKPOINT_SCHEMA_VERSION,
             "saved_at": now_iso(),
             "status": status,
+            "terminal_status": self.terminal_status or (status if status in {"completed", "failed", "interrupted"} else ""),
+            "stop_reason": self.stop_reason,
             "simulation_id": self.config.get("simulation_id"),
             "config_path": self.config_path,
             "last_completed_tick": self.last_completed_tick,
             "run_total_rounds": self.total_rounds,
+            "target_rounds": self.target_rounds,
+            "stop_mode": self.stop_mode,
+            "max_drain_rounds": self.max_drain_rounds,
+            "drain_rounds_used": max(self.last_completed_tick - self.target_rounds, 0),
             "minutes_per_round": self.minutes_per_round,
             "active_events": [event.to_state_dict() for event in self.active_events.values()],
             "queued_events": [event.to_state_dict() for event in self.queued_events.values()],
@@ -802,7 +828,10 @@ class WorldSimulationRuntime:
             "rng_state": self.rng.getstate(),
         }
 
-    def _write_checkpoint(self, status: str = "running") -> None:
+    def _write_checkpoint(self, status: str = "running", stop_reason: str = "") -> None:
+        if stop_reason:
+            self.stop_reason = stop_reason
+        self.terminal_status = status if status in {"completed", "failed", "interrupted"} else self.terminal_status
         with open(self.checkpoint_path, "w", encoding="utf-8") as f:
             json.dump(self._checkpoint_payload(status=status), f, ensure_ascii=False, indent=2)
 
@@ -847,6 +876,13 @@ class WorldSimulationRuntime:
         self._intent_counter = safe_int(payload.get("intent_counter", 0), default=0, lower=0)
         self._lifecycle_records = safe_int(payload.get("lifecycle_records", 0), default=0, lower=0)
         self.last_completed_tick = safe_int(payload.get("last_completed_tick", 0), default=0, lower=0)
+        self.stop_reason = str(payload.get("stop_reason") or "").strip()
+        self.terminal_status = str(payload.get("terminal_status") or payload.get("status") or "").strip()
+        target_rounds = safe_int(payload.get("target_rounds", 0), default=0, lower=0)
+        if target_rounds > 0:
+            self.target_rounds = target_rounds
+        max_drain_rounds = safe_int(payload.get("max_drain_rounds", self.max_drain_rounds), default=self.max_drain_rounds, lower=0)
+        self.max_drain_rounds = max_drain_rounds
 
         rng_state = payload.get("rng_state")
         if rng_state is not None:
@@ -883,7 +919,12 @@ class WorldSimulationRuntime:
                 if tick_value is None:
                     # Drop stale run-lifecycle markers from previous resume
                     # attempts so diagnostics reflect the current run history.
-                    if payload.get("event_type") in {"simulation_resumed", "simulation_end"}:
+                    if payload.get("event_type") in {
+                        "simulation_resumed",
+                        "simulation_end",
+                        "simulation_failed",
+                        "simulation_interrupted",
+                    }:
                         continue
                     kept_lines.append(json.dumps(payload, ensure_ascii=False) + "\n")
                     continue
@@ -1074,7 +1115,206 @@ class WorldSimulationRuntime:
             initial_world_state=self.initial_world_state,
         )
 
+    def _extract_embedded_json_object(self, text: str) -> Dict[str, Any]:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return {}
+        candidates: List[str] = [normalized]
+        extracted = LLMClient._extract_json_candidate(normalized)
+        if extracted and extracted not in candidates:
+            candidates.insert(0, extracted)
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    def _intent_from_invalid_json_output(
+        self,
+        tick: int,
+        scene_title: str,
+        agent: Dict[str, Any],
+        raw_text: str,
+        repaired_text: str = "",
+    ) -> Optional[ActorIntent]:
+        for candidate in [repaired_text, raw_text]:
+            payload = self._extract_embedded_json_object(candidate)
+            if not payload:
+                partial = self._intent_from_partial_json_output(
+                    tick=tick,
+                    scene_title=scene_title,
+                    agent=agent,
+                    raw_text=candidate,
+                )
+                if partial is not None and not self._intent_is_low_signal(partial):
+                    return partial
+                continue
+            structured = self._intent_from_response(
+                tick=tick,
+                agent=agent,
+                response=payload,
+                source="llm_invalid_json_recovered",
+            )
+            if self._intent_is_low_signal(structured):
+                partial = self._intent_from_partial_json_output(
+                    tick=tick,
+                    scene_title=scene_title,
+                    agent=agent,
+                    raw_text=candidate,
+                )
+                if partial is not None and not self._intent_is_low_signal(partial):
+                    return partial
+                continue
+            structured.rationale = (
+                f"recovered structured intent from invalid json: "
+                f"{clip_text(candidate or json.dumps(payload, ensure_ascii=False), 180)}"
+            )
+            return structured
+        raw_candidate = repaired_text or raw_text
+        if raw_candidate:
+            return self._intent_from_text_output(
+                tick=tick,
+                scene_title=scene_title,
+                agent=agent,
+                raw_text=raw_candidate,
+            )
+        return None
+
+    def _drain_rounds_used(self) -> int:
+        return max(self.last_completed_tick - self.target_rounds, 0)
+
+    def _should_continue_after_tick(self, tick: int) -> bool:
+        if tick < self.target_rounds:
+            return True
+        if self.stop_mode == "hard_cap":
+            return False
+        if self.max_drain_rounds <= 0:
+            return False
+        if (tick - self.target_rounds) >= self.max_drain_rounds:
+            return False
+        if self.stop_mode == "drain_active":
+            return bool(self.active_events)
+        if self.stop_mode == "drain_all":
+            return bool(self.active_events or self.queued_events)
+        return False
+
+    def _derive_stop_reason(self) -> str:
+        if self.stop_reason:
+            return self.stop_reason
+        unresolved_active = bool(self.active_events)
+        unresolved_queued = bool(self.queued_events)
+        drain_used = self._drain_rounds_used()
+        if self.last_completed_tick < self.target_rounds:
+            return "terminated_before_target"
+        if self.stop_mode == "hard_cap":
+            return "target_rounds_reached"
+        if self.stop_mode == "drain_active":
+            if not unresolved_active:
+                return "drained_active_events"
+            if drain_used >= self.max_drain_rounds:
+                return "drain_limit_reached_active_events"
+        if self.stop_mode == "drain_all":
+            if not unresolved_active and not unresolved_queued:
+                return "drained_all_events"
+            if drain_used >= self.max_drain_rounds:
+                return "drain_limit_reached_all_events"
+        return "target_rounds_reached"
+
+    def _emit_terminal_event(
+        self,
+        *,
+        event_type: str,
+        phase: str,
+        summary: str,
+        status: str,
+        error: str = "",
+    ) -> None:
+        if self._terminal_event_written:
+            return
+        stop_reason = self.stop_reason or self._derive_stop_reason()
+        self._write_meta_event(
+            {
+                "event_type": event_type,
+                "timestamp": now_iso(),
+                "simulation_mode": "world",
+                "phase": phase,
+                "summary": summary,
+                "error": error,
+                "stop_reason": stop_reason,
+                "stop_mode": self.stop_mode,
+                "target_rounds": self.target_rounds,
+                "executed_rounds": self.last_completed_tick,
+                "drain_rounds_used": self._drain_rounds_used(),
+                "world_state": self.world_state,
+                "active_events_count": len(self.active_events),
+                "queued_events_count": len(self.queued_events),
+                "completed_events_count": len(self.completed_events),
+            }
+        )
+        self._terminal_event_written = True
+        self._write_checkpoint(status=status, stop_reason=stop_reason)
+
+    def request_stop(self, reason: str) -> None:
+        payload = {
+            "reason": reason,
+            "requested_at": now_iso(),
+        }
+        with open(self.stop_request_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    def _consume_stop_request(self) -> Dict[str, Any]:
+        if not os.path.exists(self.stop_request_path):
+            return {}
+        try:
+            with open(self.stop_request_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            payload = {}
+        try:
+            os.remove(self.stop_request_path)
+        except OSError:
+            pass
+        return payload if isinstance(payload, dict) else {}
+
+    def _handle_stop_request(self) -> bool:
+        payload = self._consume_stop_request()
+        if not payload:
+            return False
+        reason = str(payload.get("reason") or "operator_stop_requested").strip() or "operator_stop_requested"
+        requested_at = str(payload.get("requested_at") or "").strip()
+        self.stop_reason = reason
+        self._emit_terminal_event(
+            event_type="simulation_interrupted",
+            phase="stopped",
+            summary=(
+                f"World simulation stopped after tick {self.last_completed_tick} "
+                f"({reason})."
+            ),
+            status="interrupted",
+        )
+        if requested_at:
+            self._write_meta_event(
+                {
+                    "event_type": "simulation_stop_acknowledged",
+                    "timestamp": now_iso(),
+                    "simulation_mode": "world",
+                    "phase": "stopped",
+                    "summary": f"Stop request acknowledged for world simulation ({reason}).",
+                    "requested_at": requested_at,
+                    "stop_reason": reason,
+                }
+            )
+        return True
+
     async def run(self) -> None:
+        if os.path.exists(self.stop_request_path):
+            try:
+                os.remove(self.stop_request_path)
+            except OSError:
+                pass
         if self.resume_from_checkpoint:
             self._truncate_logs_to_checkpoint()
             self._write_meta_event(
@@ -1083,8 +1323,10 @@ class WorldSimulationRuntime:
                     "timestamp": now_iso(),
                     "simulation_mode": "world",
                     "resume_from_tick": self.last_completed_tick,
-                    "remaining_rounds": max(self.total_rounds - self.last_completed_tick, 0),
-                    "total_rounds": self.total_rounds,
+                    "remaining_rounds": max(self.target_rounds - self.last_completed_tick, 0),
+                    "total_rounds": self.target_rounds,
+                    "stop_mode": self.stop_mode,
+                    "max_drain_rounds": self.max_drain_rounds,
                     "phase": "resuming",
                     "world_state": self._world_state_brief(),
                 }
@@ -1096,7 +1338,7 @@ class WorldSimulationRuntime:
                     "event_type": "simulation_start",
                     "timestamp": now_iso(),
                     "simulation_mode": "world",
-                    "total_rounds": self.total_rounds,
+                    "total_rounds": self.target_rounds,
                     "agents_count": len(self.agent_configs),
                     "runtime_config": {
                         "intent_agents_per_tick": self.intent_agents_per_tick,
@@ -1118,6 +1360,8 @@ class WorldSimulationRuntime:
                         "run_on_provider_degraded": self.run_on_provider_degraded,
                         "resolver_on_failure": self.resolver_on_failure,
                         "actor_on_failure": self.actor_on_failure,
+                        "stop_mode": self.stop_mode,
+                        "max_drain_rounds": self.max_drain_rounds,
                         "resolver_salvage_on_zero_accept": self.resolver_salvage_on_zero_accept,
                         "default_actor_llm_selector": self.default_actor_llm_selector,
                         "resolver_llm_selector": self.resolver_llm_selector,
@@ -1141,26 +1385,23 @@ class WorldSimulationRuntime:
                 }
             )
 
-        if self.last_completed_tick >= self.total_rounds:
-            self._write_meta_event(
-                {
-                    "event_type": "simulation_end",
-                    "timestamp": now_iso(),
-                    "simulation_mode": "world",
-                    "total_rounds": self.total_rounds,
-                    "total_actions": self._lifecycle_records,
-                    "world_state": self.world_state,
-                    "active_events_count": len(self.active_events),
-                    "queued_events_count": len(self.queued_events),
-                    "completed_events_count": len(self.completed_events),
-                }
+        if self.last_completed_tick >= self.target_rounds and not self._should_continue_after_tick(self.last_completed_tick):
+            self.stop_reason = self.stop_reason or "resume_target_already_met"
+            self._emit_terminal_event(
+                event_type="simulation_end",
+                phase="completed",
+                summary=(
+                    f"World simulation target already satisfied at tick {self.last_completed_tick} "
+                    f"({self.stop_reason})."
+                ),
+                status="completed",
             )
-            self._write_checkpoint(status="completed")
             return
 
         await self._preflight_world_providers()
 
-        for tick in range(self.last_completed_tick + 1, self.total_rounds + 1):
+        tick = self.last_completed_tick + 1
+        while True:
             scene_title = self._scene_title(tick)
 
             self._promote_queued_events(tick)
@@ -1212,14 +1453,24 @@ class WorldSimulationRuntime:
             )
             self.last_completed_tick = tick
             self._write_checkpoint(status="running")
+            if self._handle_stop_request():
+                return
             await asyncio.sleep(0.05)
+            if not self._should_continue_after_tick(tick):
+                break
+            tick += 1
 
+        self.stop_reason = self._derive_stop_reason()
         self._write_meta_event(
             {
                 "event_type": "simulation_end",
                 "timestamp": now_iso(),
                 "simulation_mode": "world",
-                "total_rounds": self.total_rounds,
+                "total_rounds": self.last_completed_tick,
+                "target_rounds": self.target_rounds,
+                "stop_mode": self.stop_mode,
+                "stop_reason": self.stop_reason,
+                "drain_rounds_used": self._drain_rounds_used(),
                 "total_actions": self._lifecycle_records,
                 "world_state": self.world_state,
                 "active_events_count": len(self.active_events),
@@ -1231,7 +1482,8 @@ class WorldSimulationRuntime:
                 ][:20],
             }
         )
-        self._write_checkpoint(status="completed")
+        self._terminal_event_written = True
+        self._write_checkpoint(status="completed", stop_reason=self.stop_reason)
 
     def _reset_output_files(self) -> None:
         for path in (self.actions_log, self.snapshots_log, self.world_state_path, self.checkpoint_path):
@@ -1608,7 +1860,55 @@ class WorldSimulationRuntime:
             return intent
         except Exception as exc:
             if isinstance(exc, InvalidJSONResponseError):
-                raw_text = exc.raw_response or exc.repaired_response
+                recovered_intent = self._intent_from_invalid_json_output(
+                    tick=tick,
+                    scene_title=scene_title,
+                    agent=agent,
+                    raw_text=str(exc.raw_response or ""),
+                    repaired_text=str(exc.repaired_response or ""),
+                )
+                if recovered_intent is not None:
+                    if self._intent_is_low_signal(recovered_intent):
+                        raw_text = str(exc.repaired_response or exc.raw_response or "")
+                        recovered_intent = self._intent_from_text_output(
+                            tick=tick,
+                            scene_title=scene_title,
+                            agent=agent,
+                            raw_text=raw_text,
+                        )
+                    if self._intent_is_low_signal(recovered_intent):
+                        raw_text = str(exc.repaired_response or exc.raw_response or "")
+                        recovered_intent = self._heuristic_intent(tick, scene_title, agent)
+                        recovered_intent.source = "llm_low_signal_fallback"
+                        recovered_intent.rationale = f"invalid-json low-signal fallback: {raw_text[:180]}"
+                        reason_code = "actor_invalid_json_low_signal_fallback"
+                        status = "low_signal_fallback"
+                    elif recovered_intent.source == "llm_invalid_json_recovered":
+                        reason_code = "actor_invalid_json_structured_recovered"
+                        status = "json_recovered"
+                    elif recovered_intent.source == "llm_invalid_json_partial_recovered":
+                        reason_code = "actor_invalid_json_partial_recovered"
+                        status = "partial_recovered"
+                    else:
+                        reason_code = "actor_invalid_json_text_recovered"
+                        status = "text_recovered"
+
+                    self._write_llm_trace(
+                        stage="actor_intent",
+                        tick=tick,
+                        provider_role=provider_role,
+                        llm=agent_llm,
+                        status=status,
+                        reason_code=reason_code,
+                        context=scene_title,
+                        messages=messages,
+                        raw_response=str(exc.raw_response or ""),
+                        repaired_response=str(exc.repaired_response or ""),
+                        outcome=recovered_intent.to_dict(),
+                        error=str(exc),
+                    )
+                    return recovered_intent
+                raw_text = str(exc.repaired_response or exc.raw_response or "")
                 if raw_text:
                     recovered_intent = self._intent_from_text_output(
                         tick=tick,
@@ -1745,6 +2045,253 @@ class WorldSimulationRuntime:
                 if candidate:
                     return candidate
         return ""
+
+    def _extract_json_style_int(
+        self,
+        raw_text: Any,
+        field_names: Sequence[str],
+        *,
+        lower: int,
+        upper: int,
+    ) -> Optional[int]:
+        text = str(raw_text or "")
+        if not text.strip():
+            return None
+
+        for field_name in field_names:
+            match = re.search(
+                rf'["\'“”`]?{re.escape(field_name)}["\'“”`]?\s*[:：]\s*(-?\d+(?:\.\d+)?)',
+                text,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                continue
+            try:
+                value = int(round(float(match.group(1).strip())))
+            except (TypeError, ValueError):
+                continue
+            return max(lower, min(upper, value))
+        return None
+
+    def _extract_json_like_segment(
+        self,
+        raw_text: Any,
+        field_names: Sequence[str],
+        *,
+        opener: str,
+        closer: str,
+    ) -> str:
+        text = str(raw_text or "")
+        if not text.strip():
+            return ""
+
+        for field_name in field_names:
+            match = re.search(
+                rf'["\'“”`]?{re.escape(field_name)}["\'“”`]?\s*[:：]\s*{re.escape(opener)}',
+                text,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                continue
+
+            start = match.end() - 1
+            depth = 0
+            in_double = False
+            in_single = False
+            escaped = False
+
+            for idx in range(start, len(text)):
+                char = text[idx]
+                if escaped:
+                    escaped = False
+                    continue
+                if char == "\\" and (in_double or in_single):
+                    escaped = True
+                    continue
+                if char == '"' and not in_single:
+                    in_double = not in_double
+                    continue
+                if char == "'" and not in_double:
+                    in_single = not in_single
+                    continue
+                if in_double or in_single:
+                    continue
+                if char == opener:
+                    depth += 1
+                elif char == closer:
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:idx + 1]
+
+            return text[start:]
+
+        return ""
+
+    def _extract_json_style_list(
+        self,
+        raw_text: Any,
+        field_names: Sequence[str],
+        *,
+        limit: int = 8,
+    ) -> List[str]:
+        segment = self._extract_json_like_segment(
+            raw_text,
+            field_names,
+            opener="[",
+            closer="]",
+        )
+        if not segment:
+            return []
+
+        items: List[str] = []
+        for match in re.findall(
+            r'"((?:\\.|[^"\\]){1,240})"|“([^”]{1,240})”|\'((?:\\.|[^\'\\]){1,240})\'',
+            segment,
+        ):
+            candidate = next((item for item in match if item), "")
+            cleaned = normalize_optional_text(
+                candidate.replace('\\"', '"').replace("\\n", " ").replace("\\t", " ")
+            )
+            if cleaned:
+                items.append(cleaned)
+
+        if not items:
+            inner = segment.strip().lstrip("[").rstrip("]")
+            for part in re.split(r",|\n", inner):
+                cleaned = self._clean_intent_candidate(part)
+                if cleaned:
+                    items.append(cleaned)
+
+        return dedupe_keep_order(items)[:limit]
+
+    def _extract_json_style_state_impacts(self, raw_text: Any) -> Dict[str, float]:
+        segment = self._extract_json_like_segment(
+            raw_text,
+            ["state_impacts"],
+            opener="{",
+            closer="}",
+        )
+        if not segment:
+            return {}
+
+        payload: Dict[str, float] = {}
+        for key in ("conflict", "scarcity", "legitimacy", "momentum", "stability"):
+            match = re.search(
+                rf'["\'“”`]?{re.escape(key)}["\'“”`]?\s*[:：]\s*(-?\d+(?:\.\d+)?)',
+                segment,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                continue
+            payload[key] = safe_float(match.group(1), 0.0)
+        return self._normalize_state_impacts(payload)
+
+    def _extract_partial_intent_payload(self, raw_text: Any) -> Dict[str, Any]:
+        text = str(raw_text or "")
+        if not text.strip() or "{" not in text:
+            return {}
+
+        payload: Dict[str, Any] = {}
+        for key, field_names in {
+            "objective": ["objective"],
+            "summary": ["summary"],
+            "location": ["location"],
+            "target": ["target"],
+            "rationale": ["rationale"],
+        }.items():
+            value = self._extract_json_style_field(text, field_names)
+            if value:
+                payload[key] = value
+
+        for key, (field_names, lower, upper) in {
+            "desired_duration": (["desired_duration"], 1, self.max_event_duration),
+            "priority": (["priority"], 1, 5),
+            "urgency": (["urgency"], 1, 5),
+            "risk_level": (["risk_level"], 1, 5),
+        }.items():
+            value = self._extract_json_style_int(text, field_names, lower=lower, upper=upper)
+            if value is not None:
+                payload[key] = value
+
+        dependencies = self._extract_json_style_list(text, ["dependencies"], limit=8)
+        if dependencies:
+            payload["dependencies"] = dependencies
+
+        participants = self._extract_json_style_list(text, ["participants"], limit=8)
+        if participants:
+            payload["participants"] = participants
+
+        tags = self._extract_json_style_list(text, ["tags"], limit=6)
+        if tags:
+            payload["tags"] = tags
+
+        state_impacts = self._extract_json_style_state_impacts(text)
+        if state_impacts:
+            payload["state_impacts"] = state_impacts
+
+        meaningful_fields = [
+            key
+            for key in (
+                "objective",
+                "summary",
+                "location",
+                "target",
+                "desired_duration",
+                "priority",
+                "urgency",
+                "risk_level",
+                "dependencies",
+                "participants",
+                "tags",
+                "state_impacts",
+            )
+            if payload.get(key)
+        ]
+        return payload if meaningful_fields else {}
+
+    def _intent_from_partial_json_output(
+        self,
+        tick: int,
+        scene_title: str,
+        agent: Dict[str, Any],
+        raw_text: str,
+    ) -> Optional[ActorIntent]:
+        partial_payload = self._extract_partial_intent_payload(raw_text)
+        if not partial_payload:
+            return None
+
+        base_intent = self._intent_from_text_output(
+            tick=tick,
+            scene_title=scene_title,
+            agent=agent,
+            raw_text=raw_text,
+        )
+        response = {
+            "objective": partial_payload.get("objective") or base_intent.objective,
+            "summary": partial_payload.get("summary") or base_intent.summary,
+            "location": partial_payload.get("location") or base_intent.location,
+            "target": partial_payload.get("target") or base_intent.target,
+            "desired_duration": partial_payload.get("desired_duration", base_intent.desired_duration),
+            "priority": partial_payload.get("priority", base_intent.priority),
+            "urgency": partial_payload.get("urgency", base_intent.urgency),
+            "risk_level": partial_payload.get("risk_level", base_intent.risk_level),
+            "dependencies": partial_payload.get("dependencies") or base_intent.dependencies,
+            "participants": partial_payload.get("participants") or base_intent.participants,
+            "tags": partial_payload.get("tags") or base_intent.tags,
+            "state_impacts": partial_payload.get("state_impacts") or base_intent.state_impacts,
+            "rationale": (
+                partial_payload.get("rationale")
+                or f"partially recovered structured intent from invalid json: {clip_text(raw_text, 180)}"
+            ),
+        }
+        intent = self._intent_from_response(
+            tick=tick,
+            agent=agent,
+            response=response,
+            source="llm_invalid_json_partial_recovered",
+        )
+        intent.rationale = str(response["rationale"]).strip()[:220]
+        return intent
 
     def _clean_intent_candidate(self, text: Any, agent_name: str = "") -> str:
         cleaned = normalize_optional_text(text)
@@ -3772,6 +4319,63 @@ class WorldSimulationRuntime:
                 }
             )
 
+        hinted_accept_count = 0
+        for text in summary_texts:
+            for pattern in (
+                r"其中\s*(\d+)\s*个被整理为事件",
+                r"(\d+)\s*个被整理为事件",
+                r"整理为\s*(\d+)\s*个事件",
+                r"accepted\s*(\d+)\s*events?",
+            ):
+                match = re.search(pattern, text, flags=re.IGNORECASE)
+                if match:
+                    hinted_accept_count = max(hinted_accept_count, safe_int(match.group(1), default=0, lower=0))
+        if hinted_accept_count > len(accepted_events):
+            accepted_owner_ids = {
+                normalize_optional_text(item.get("owner_intent_id"))
+                for item in accepted_events
+            }
+            deferred_ids = {
+                normalize_optional_text(item.get("intent_id"))
+                for item in deferred_intents
+            }
+            rejected_ids = {
+                normalize_optional_text(item.get("intent_id"))
+                for item in rejected_intents
+            }
+            generic_summary = clip_text("；".join(summary_sentences[:2]), 220)
+            ranked_candidates = sorted(
+                [
+                    intent
+                    for intent in intents
+                    if intent.intent_id not in accepted_owner_ids
+                    and intent.intent_id not in deferred_ids
+                    and intent.intent_id not in rejected_ids
+                ],
+                key=lambda item: (item.priority, item.urgency, item.risk_level),
+                reverse=True,
+            )
+            missing_accepts = max(hinted_accept_count - len(accepted_events), 0)
+            for intent in ranked_candidates[:missing_accepts]:
+                accepted_events.append(
+                    {
+                        "title": intent.objective,
+                        "summary": generic_summary or intent.summary,
+                        "owner_intent_id": intent.intent_id,
+                        "supporting_intent_ids": [],
+                        "priority": intent.priority,
+                        "duration_ticks": intent.desired_duration,
+                        "location": intent.location,
+                        "dependencies": intent.dependencies,
+                        "participants": intent.participants,
+                        "state_impacts": intent.state_impacts,
+                        "rationale": (
+                            "bootstrapped from resolver summary-only accepted count: "
+                            f"{clip_text(generic_summary or intent.summary, 180)}"
+                        ),
+                    }
+                )
+
         if not accepted_events and not deferred_intents and not rejected_intents:
             return normalized, meta
 
@@ -4871,6 +5475,15 @@ def main() -> None:
     args = parser.parse_args()
 
     runtime: Optional[WorldSimulationRuntime] = None
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+
+    def _raise_interrupt(signum, frame):  # type: ignore[unused-argument]
+        signal_name = getattr(signal.Signals(signum), "name", str(signum))
+        raise KeyboardInterrupt(f"received {signal_name}")
+
+    signal.signal(signal.SIGTERM, _raise_interrupt)
+    signal.signal(signal.SIGINT, _raise_interrupt)
     try:
         with WorldRunLease(config_path=args.config):
             runtime = WorldSimulationRuntime(
@@ -4879,20 +5492,41 @@ def main() -> None:
                 resume_from_checkpoint=args.resume_from_checkpoint,
             )
             asyncio.run(runtime.run())
+    except KeyboardInterrupt as exc:
+        if runtime is not None:
+            runtime.stop_reason = "interrupted_by_signal"
+            runtime._emit_terminal_event(
+                event_type="simulation_interrupted",
+                phase="interrupted",
+                summary=f"World simulation interrupted: {exc}",
+                status="interrupted",
+                error=str(exc),
+            )
+        raise
     except Exception as exc:
         if runtime is not None:
+            runtime.stop_reason = "runtime_exception"
+            runtime._emit_terminal_event(
+                event_type="simulation_failed",
+                phase="failed",
+                summary=f"World simulation failed: {exc}",
+                status="failed",
+                error=str(exc),
+            )
             runtime._write_meta_event(
                 {
-                    "event_type": "simulation_failed",
+                    "event_type": "simulation_failure_traceback",
                     "timestamp": now_iso(),
                     "simulation_mode": "world",
                     "phase": "failed",
-                    "summary": f"World simulation failed: {exc}",
-                    "error": str(exc),
+                    "summary": "World simulation traceback captured.",
                     "traceback": traceback.format_exc(limit=8),
                 }
             )
         raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
 
 
 if __name__ == "__main__":

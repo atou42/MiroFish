@@ -240,11 +240,14 @@ def run_staged_experiment(
 
     stage1_cmd = [
         python_bin,
-        "scripts/run_world_simulation.py",
-        "--config",
-        config_path,
+        "scripts/world_run.py",
+        "run",
+        "--simulation-id",
+        simulation_id,
         "--max-rounds",
         str(stage1_rounds),
+        "--max-resume-attempts",
+        "4",
     ]
     manifest["stages"]["stage1_run"] = _run_command(stage1_cmd, backend_dir)
     manifest["stages"]["stage1_diagnostics"] = validate_diagnostics_or_raise(
@@ -261,12 +264,14 @@ def run_staged_experiment(
 
     stage2_cmd = [
         python_bin,
-        "scripts/run_world_simulation.py",
-        "--config",
-        config_path,
+        "scripts/world_run.py",
+        "resume",
+        "--simulation-id",
+        simulation_id,
         "--max-rounds",
         str(final_rounds),
-        "--resume-from-checkpoint",
+        "--max-resume-attempts",
+        "4",
     ]
     manifest["stages"]["final_run"] = _run_command(stage2_cmd, backend_dir)
     manifest["stages"]["final_diagnostics"] = validate_diagnostics_or_raise(

@@ -763,6 +763,13 @@ class Config:
                 "WORLD_ACTOR_ON_FAILURE",
                 cls.WORLD_ACTOR_ON_FAILURE,
             ).strip().lower(),
+            "stop_mode": os.environ.get(
+                "WORLD_STOP_MODE",
+                "hard_cap",
+            ).strip().lower(),
+            "max_drain_rounds": int(
+                os.environ.get("WORLD_MAX_DRAIN_ROUNDS", 0)
+            ),
         }
     
     @classmethod

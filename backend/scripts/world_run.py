@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -18,6 +19,7 @@ sys.path.insert(0, _backend_dir)
 sys.path.insert(0, _project_root)
 
 from app.config import Config
+from app.services.simulation_runner import RunnerStatus, SimulationRunner
 from app.utils.world_run_lock import inspect_world_run_lease, world_run_paths_for_config
 from scripts.run_world_simulation import restore_world_checkpoint_from_logs
 from scripts.run_world_staged_experiment import (
@@ -60,28 +62,172 @@ def _python_bin() -> str:
     return candidate if os.path.exists(candidate) else sys.executable
 
 
-def _run_world_process(
+def _configured_total_rounds(config_path: str) -> int:
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    time_config = config.get("time_config", {})
+    configured_rounds = int(
+        time_config.get(
+            "total_ticks",
+            time_config.get("total_rounds", 0),
+        )
+        or 0
+    )
+    if configured_rounds > 0:
+        return configured_rounds
+    total_hours = int(time_config.get("total_simulation_hours", 12) or 12)
+    minutes_per_round = int(time_config.get("minutes_per_round", 60) or 60)
+    return max(1, int(total_hours * 60 / max(minutes_per_round, 1)))
+
+
+def _resolve_target_rounds(
+    config_path: str,
+    *,
+    max_rounds: Optional[int],
+    resume_from_checkpoint: bool,
+) -> int:
+    configured_rounds = _configured_total_rounds(config_path)
+    if max_rounds is not None and max_rounds > 0:
+        return int(max_rounds)
+    if resume_from_checkpoint:
+        checkpoint_status = _status(config_path).get("checkpoint") or {}
+        checkpoint_rounds = int(checkpoint_status.get("run_total_rounds") or 0)
+        if checkpoint_rounds > 0:
+            return checkpoint_rounds
+    return configured_rounds
+
+
+def _run_world_process_once(
     config_path: str,
     *,
     max_rounds: Optional[int] = None,
     resume_from_checkpoint: bool = False,
 ) -> Dict[str, Any]:
+    simulation_id = _simulation_id_from_config(config_path)
+    target_rounds = _resolve_target_rounds(
+        config_path,
+        max_rounds=max_rounds,
+        resume_from_checkpoint=resume_from_checkpoint,
+    )
     cmd = [_python_bin(), "scripts/run_world_simulation.py", "--config", config_path]
     if max_rounds is not None and max_rounds > 0:
         cmd.extend(["--max-rounds", str(max_rounds)])
     if resume_from_checkpoint:
         cmd.append("--resume-from-checkpoint")
     started_at = datetime.now().isoformat()
-    completed = subprocess.run(cmd, cwd=_backend_dir, check=False)
+    process = subprocess.Popen(cmd, cwd=_backend_dir)
+    SimulationRunner.bootstrap_world_operator_run_state(
+        simulation_id,
+        config_path,
+        max_rounds=target_rounds,
+        resume_from_checkpoint=resume_from_checkpoint,
+        process_pid=process.pid,
+    )
+
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            break
+        SimulationRunner.refresh_world_run_state_from_artifacts(
+            simulation_id,
+            persist=True,
+            fallback_runner_status=RunnerStatus.RUNNING,
+            process_pid=process.pid,
+        )
+        time.sleep(1.0)
+
+    SimulationRunner.refresh_world_run_state_from_artifacts(
+        simulation_id,
+        persist=True,
+    )
     result = {
         "command": cmd,
         "started_at": started_at,
         "completed_at": datetime.now().isoformat(),
-        "returncode": completed.returncode,
+        "returncode": returncode,
     }
-    if completed.returncode != 0:
-        raise RuntimeError(f"world run failed with returncode={completed.returncode}")
+    if returncode != 0:
+        raise RuntimeError(f"world run failed with returncode={returncode}")
     return result
+
+
+def _checkpoint_reached_target(checkpoint: Dict[str, Any], target_rounds: int) -> bool:
+    status = str(checkpoint.get("status") or "").strip().lower()
+    last_completed_tick = int(checkpoint.get("last_completed_tick") or 0)
+    return status == "completed" and last_completed_tick >= target_rounds
+
+
+def _run_world_process(
+    config_path: str,
+    *,
+    max_rounds: Optional[int] = None,
+    resume_from_checkpoint: bool = False,
+    max_resume_attempts: int = 3,
+) -> Dict[str, Any]:
+    target_rounds = _resolve_target_rounds(
+        config_path,
+        max_rounds=max_rounds,
+        resume_from_checkpoint=resume_from_checkpoint,
+    )
+    attempts = []
+    started_at = datetime.now().isoformat()
+    next_resume = resume_from_checkpoint
+    last_error = ""
+
+    for attempt_index in range(max(max_resume_attempts, 0) + 1):
+        try:
+            run_result = _run_world_process_once(
+                config_path,
+                max_rounds=max_rounds,
+                resume_from_checkpoint=next_resume,
+            )
+        except Exception as exc:
+            run_result = {
+                "command": [],
+                "started_at": datetime.now().isoformat(),
+                "completed_at": datetime.now().isoformat(),
+                "returncode": -1,
+                "error": str(exc),
+            }
+            last_error = str(exc)
+
+        status_payload = _status(config_path)
+        checkpoint = status_payload.get("checkpoint") or {}
+        run_result["checkpoint_after"] = checkpoint
+        run_result["attempt_index"] = attempt_index
+        run_result["resume_from_checkpoint"] = next_resume
+        attempts.append(run_result)
+
+        if _checkpoint_reached_target(checkpoint, target_rounds):
+            return {
+                "command": attempts[-1].get("command", []),
+                "started_at": started_at,
+                "completed_at": datetime.now().isoformat(),
+                "returncode": 0,
+                "target_rounds": target_rounds,
+                "auto_resumed": len(attempts) > 1,
+                "attempts": attempts,
+                "checkpoint": checkpoint,
+            }
+
+        last_completed_tick = int(checkpoint.get("last_completed_tick") or 0)
+        checkpoint_status = str(checkpoint.get("status") or "").strip().lower()
+        terminal = checkpoint_status in {"failed", "interrupted"}
+        if terminal:
+            last_error = last_error or f"checkpoint.status={checkpoint_status}"
+        if attempt_index >= max(max_resume_attempts, 0):
+            break
+        if last_completed_tick >= target_rounds:
+            break
+        next_resume = True
+        time.sleep(0.2)
+
+    checkpoint = attempts[-1].get("checkpoint_after", {}) if attempts else {}
+    raise RuntimeError(
+        "world supervised run did not reach target rounds: "
+        f"target_rounds={target_rounds}, checkpoint_status={checkpoint.get('status')}, "
+        f"last_completed_tick={checkpoint.get('last_completed_tick')}, error={last_error or 'unknown'}"
+    )
 
 
 def _finalize(
@@ -126,9 +272,15 @@ def _status(config_path: str) -> Dict[str, Any]:
         "lease": lease,
         "checkpoint": {
             "status": checkpoint.get("status"),
+            "terminal_status": checkpoint.get("terminal_status"),
+            "stop_reason": checkpoint.get("stop_reason"),
             "saved_at": checkpoint.get("saved_at"),
             "last_completed_tick": checkpoint.get("last_completed_tick"),
             "run_total_rounds": checkpoint.get("run_total_rounds"),
+            "target_rounds": checkpoint.get("target_rounds"),
+            "stop_mode": checkpoint.get("stop_mode"),
+            "max_drain_rounds": checkpoint.get("max_drain_rounds"),
+            "drain_rounds_used": checkpoint.get("drain_rounds_used"),
         },
     }
 
@@ -143,6 +295,7 @@ def main() -> None:
         sub.add_argument("--simulation-id", default="")
         if name in {"run", "resume"}:
             sub.add_argument("--max-rounds", type=int, default=None)
+            sub.add_argument("--max-resume-attempts", type=int, default=3)
             sub.add_argument("--finalize-label", default="")
             sub.add_argument("--report-timeout-seconds", type=float, default=DEFAULT_REPORT_TIMEOUT_SECONDS)
         if name == "restore":
@@ -171,6 +324,7 @@ def main() -> None:
                 config_path,
                 max_rounds=args.max_rounds,
                 resume_from_checkpoint=(args.command == "resume"),
+                max_resume_attempts=args.max_resume_attempts,
             ),
             "simulation_id": simulation_id,
         }
