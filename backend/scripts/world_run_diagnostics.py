@@ -18,6 +18,7 @@ sys.path.insert(0, _backend_dir)
 sys.path.insert(0, _project_root)
 
 from app.config import Config
+from app.services.world_reading_surface import generate_reading_surface
 
 
 def _load_json(path: str) -> Dict[str, Any]:
@@ -227,6 +228,18 @@ def _build_markdown(summary: Dict[str, Any]) -> str:
             )
         lines.append("")
 
+    reading_surface = summary.get("reading_surface") or {}
+    if reading_surface:
+        lines.append("## Reading Surfaces")
+        lines.append("")
+        chronicle = reading_surface.get("chronicle") or {}
+        actor_board = reading_surface.get("actor_board") or {}
+        risk_digest = reading_surface.get("risk_digest") or {}
+        lines.append(f"- Chronicle: `{chronicle.get('markdown_path', '')}`")
+        lines.append(f"- Actor Board: `{actor_board.get('markdown_path', '')}`")
+        lines.append(f"- Risk Digest: `{risk_digest.get('markdown_path', '')}`")
+        lines.append("")
+
     return "\n".join(lines).strip() + "\n"
 
 
@@ -251,6 +264,16 @@ def validate_summary(summary: Dict[str, Any]) -> List[str]:
         errors.append("diagnostics.last_tick_end missing")
     if not isinstance(diagnostics.get("world_state"), dict) or not diagnostics.get("world_state"):
         errors.append("diagnostics.world_state missing")
+
+    reading_surface = summary.get("reading_surface") or {}
+    for key in ("chronicle", "actor_board", "risk_digest"):
+        section = reading_surface.get(key) or {}
+        markdown_path = str(section.get("markdown_path") or "")
+        json_path = str(section.get("json_path") or "")
+        if not markdown_path or not os.path.exists(markdown_path):
+            errors.append(f"reading_surface.{key}.markdown_path missing")
+        if not json_path or not os.path.exists(json_path):
+            errors.append(f"reading_surface.{key}.json_path missing")
     return errors
 
 
@@ -281,6 +304,14 @@ def summarize(simulation_id: str, label: str) -> Dict[str, Any]:
     base_name = f"{stamp}-{label}"
     json_path = os.path.join(diagnostics_dir, f"{base_name}.json")
     md_path = os.path.join(diagnostics_dir, f"{base_name}.md")
+    summary["reading_surface"] = generate_reading_surface(
+        simulation_id=simulation_id,
+        label=label,
+        diagnostics_dir=diagnostics_dir,
+        base_name=base_name,
+        actions=actions,
+        checkpoint=checkpoint,
+    )
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     with open(md_path, "w", encoding="utf-8") as f:

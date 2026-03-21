@@ -2,6 +2,16 @@
 
 本页把这条 fork 线已经真实跑过、真实复盘过的 world run 沉淀成可读 showcase，而不是只把运行产物留在本地 `backend/uploads/`。
 
+## 阅读面与入口
+
+| World Story Surface | World Report Entry |
+|---|---|
+| ![World story hero](./assets/world-story-hero.png) | ![World report entry](./assets/world-report-entry.png) |
+
+- `world story` 页把真实运行产物压缩成适合外部阅读的五层结构：`hero / episodes / factions / risks / process`
+- `report` 页右上角提供“世界故事页”入口，world case 不再需要靠手动 route 跳转
+- 当前主 showcase case 可直接打开：`/world-story/sim_8ac60f042d62`
+
 ## Case 1: 长程 240 轮推进
 
 - Simulation ID: `sim_8ac60f042d62`

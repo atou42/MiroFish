@@ -33,6 +33,14 @@ export const getSimulation = (simulationId) => {
 }
 
 /**
+ * 获取 world story 展示数据
+ * @param {string} simulationId
+ */
+export const getWorldStory = (simulationId) => {
+  return service.get(`/api/simulation/${simulationId}/world-story`)
+}
+
+/**
  * 获取模拟的 Agent Profiles
  * @param {string} simulationId
  * @param {string} platform - 'reddit' | 'twitter' | 'world'

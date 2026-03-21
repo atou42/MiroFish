@@ -24,18 +24,21 @@ If you want "given lore, actors, conflicts, and rules, keep the world advancing 
 - Treating `world mode` as a first-class runtime
 - Hardening the full `checkpoint -> resume -> restore -> finalize` chain
 - Operator CLI for world runs:
+  - `compile-pack`
   - `run`
   - `resume`
   - `status`
   - `restore`
   - `finalize`
   - `staged`
+  - `pipeline`
 - Better runtime observability:
   - `run_state.json`
   - `world/checkpoint.json`
   - `world/actions.jsonl`
   - `world/state_snapshots.jsonl`
   - `world/diagnostics/*.md|json`
+  - `world chronicle / actor board / risk digest`
 - Multi-provider / multi-model routing:
   - `llm_registry.json`
   - OpenClaw config reuse
@@ -56,6 +59,16 @@ If you want "given lore, actors, conflicts, and rules, keep the world advancing 
 ## Showcase
 
 Detailed cases: [docs/showcases/world-mode-runs.en.md](./docs/showcases/world-mode-runs.en.md)
+
+### What You Can Show Immediately
+
+| World Story Surface | World Report Entry |
+|---|---|
+| ![World story hero](./docs/showcases/assets/world-story-hero.png) | ![World report entry](./docs/showcases/assets/world-report-entry.png) |
+
+- the new `world story` surface turns long-running simulation output into `hero -> episodes -> factions -> risks -> process`
+- the `report` page now links directly into the story surface instead of forcing manual URL construction
+- for the real showcase run, you can open `/world-story/sim_8ac60f042d62`
 
 Two representative runs are already documented:
 
@@ -159,7 +172,32 @@ Typical flow:
 3. Let the system produce a `simulation_config.json`
 4. Run from UI or switch to the CLI/operator workflow for longer supervised runs
 
+### 6. Compile a World Pack First
+
+If you want reproducible, versionable inputs that bootstrap directly into a resumable simulation, compile the raw materials into a world pack first:
+
+```bash
+cd backend
+
+./.venv/bin/python scripts/world_run.py compile-pack \
+  --source-dir /absolute/path/to/world-materials \
+  --simulation-id sim_my_world \
+  --pack-title "My World" \
+  --no-llm-profiles
+```
+
+This writes a runnable bundle directly into `backend/uploads/simulations/<simulation_id>/`, including:
+
+- `simulation_config.json`
+- `world_profiles.json`
+- `world_pack/manifest.json`
+- `world_pack/source_digest.md`
+
+Details: [docs/operator/world-operator-guide.en.md](./docs/operator/world-operator-guide.en.md)
+
 ## World CLI / Operator Workflow
+
+If you want the canonical long-run operator sequence, start here: [docs/operator/world-operator-guide.en.md](./docs/operator/world-operator-guide.en.md)
 
 If you already have a prepared `simulation_config.json`, you can run it directly:
 
@@ -211,6 +249,22 @@ Run in staged form, for example `8 -> 16`:
   --final-rounds 16
 ```
 
+For a more general multi-stage pipeline:
+
+```bash
+./.venv/bin/python scripts/world_run.py pipeline \
+  --simulation-id <simulation_id> \
+  --stage-rounds 8,16,32,64
+```
+
+A practical checklist:
+
+1. `compile-pack` the raw materials into a runnable simulation
+2. `run --max-rounds 2` for a smoke pass
+3. `pipeline --stage-rounds 8,16,32,...` for supervised long runs
+4. read diagnostics plus chronicle / actor board / risk digest
+5. `finalize` for the end report
+
 ### One Important Observability Detail
 
 In this fork:
@@ -225,6 +279,20 @@ This is intentional:
 - `run_state` stays useful for live operator visibility
 
 Once the run reaches a terminal state, they are reconciled automatically.
+
+This fork also writes three higher-level reading surfaces into `world/diagnostics/`:
+
+- `chronicle`: the tick-by-tick world trajectory, mainly from `state_snapshots.jsonl` and `tick_end`
+- `actor board`: checkpoint actor selection / event counts joined back to `simulation_config.json`
+- `risk digest`: unresolved events from `simulation_end.unresolved_events`, or `active_events + queued_events` as fallback
+
+You can regenerate them directly:
+
+```bash
+./.venv/bin/python scripts/generate_world_reading_surface.py \
+  --simulation-id <simulation_id> \
+  --label final32
+```
 
 ## Model Routing and Configuration
 
@@ -270,6 +338,7 @@ MiroFish/
 │   └── uploads/
 ├── frontend/
 ├── docs/
+│   ├── operator/
 │   └── showcases/
 ├── llm_registry.json.example
 ├── README.md
@@ -281,6 +350,7 @@ The directories you will touch most often:
 - `backend/scripts/`: world run / diagnostics / report / eval scripts
 - `backend/evals/`: presets, eval suites, playbooks, case sets
 - `backend/uploads/simulations/`: runtime artifacts
+- `docs/operator/`: operator workflow, world pack, and long-run pipeline guides
 - `docs/showcases/`: shareable showcase pages that belong in Git
 
 ## Current Boundaries

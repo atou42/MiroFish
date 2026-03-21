@@ -5,6 +5,7 @@ import SimulationView from '../views/SimulationView.vue'
 import SimulationRunView from '../views/SimulationRunView.vue'
 import ReportView from '../views/ReportView.vue'
 import InteractionView from '../views/InteractionView.vue'
+import WorldStoryView from '../views/WorldStoryView.vue'
 
 const routes = [
   {
@@ -34,6 +35,12 @@ const routes = [
     path: '/report/:reportId',
     name: 'Report',
     component: ReportView,
+    props: true
+  },
+  {
+    path: '/world-story/:simulationId',
+    name: 'WorldStory',
+    component: WorldStoryView,
     props: true
   },
   {

@@ -22,18 +22,21 @@
 - 把 `world mode` 当成一等公民，而不是附属功能
 - 增强 `checkpoint -> resume -> restore -> finalize` 的完整链路
 - 增强 operator CLI：
+  - `compile-pack`
   - `run`
   - `resume`
   - `status`
   - `restore`
   - `finalize`
   - `staged`
+  - `pipeline`
 - 打通运行态观测：
   - `run_state.json`
   - `world/checkpoint.json`
   - `world/actions.jsonl`
   - `world/state_snapshots.jsonl`
   - `world/diagnostics/*.md|json`
+  - `world chronicle / actor board / risk digest`
 - 支持多 provider / 多 model 路由：
   - `llm_registry.json`
   - OpenClaw 配置复用
@@ -54,6 +57,16 @@
 ## Showcase
 
 详细案例见：[docs/showcases/world-mode-runs.md](./docs/showcases/world-mode-runs.md)
+
+### 现在可以直接展示什么
+
+| World Story Surface | World Report Entry |
+|---|---|
+| ![World story hero](./docs/showcases/assets/world-story-hero.png) | ![World report entry](./docs/showcases/assets/world-report-entry.png) |
+
+- `world story` 页已经把长跑结果整理成可读的展示面：`hero -> episodes -> factions -> risks -> process`
+- `report` 页右上角可直接跳到故事页，不再需要手动拼 URL
+- 对真实 case `sim_8ac60f042d62`，可直接访问：`/world-story/sim_8ac60f042d62`
 
 当前这个 fork 已经沉淀了两类代表性案例：
 
@@ -157,7 +170,32 @@ npm run dev
 3. 让系统生成 `simulation_config.json`
 4. 通过 UI 直接运行，或切换到 CLI/operator 路径继续控制
 
+### 6. 先编译 world pack，再进入长跑
+
+如果你希望输入可复跑、可版本化、可直接 bootstrap 成一个可续跑 simulation，可以先把原始资料编译成 world pack：
+
+```bash
+cd backend
+
+./.venv/bin/python scripts/world_run.py compile-pack \
+  --source-dir /absolute/path/to/world-materials \
+  --simulation-id sim_my_world \
+  --pack-title "My World" \
+  --no-llm-profiles
+```
+
+这个命令会直接在 `backend/uploads/simulations/<simulation_id>/` 下生成：
+
+- `simulation_config.json`
+- `world_profiles.json`
+- `world_pack/manifest.json`
+- `world_pack/source_digest.md`
+
+详细说明见：[docs/operator/world-operator-guide.md](./docs/operator/world-operator-guide.md)
+
 ## World CLI / Operator 工作流
+
+如果你要的是“compile -> smoke -> staged -> report -> review”的长期工作流，建议直接看：[docs/operator/world-operator-guide.md](./docs/operator/world-operator-guide.md)
 
 如果你已经有一个准备好的 `simulation_config.json`，可以直接用 operator CLI 跑：
 
@@ -209,6 +247,22 @@ cd backend
   --final-rounds 16
 ```
 
+更通用的多阶段 pipeline：
+
+```bash
+./.venv/bin/python scripts/world_run.py pipeline \
+  --simulation-id <simulation_id> \
+  --stage-rounds 8,16,32,64
+```
+
+一个推荐 checklist：
+
+1. `compile-pack` 把原始资料洗成可复跑 simulation
+2. `run --max-rounds 2` 做 smoke
+3. `pipeline --stage-rounds 8,16,32,...` 做监督式长跑
+4. 用 diagnostics / reading surfaces 看 chronicle、actor board、risk digest
+5. `finalize` 补最终报告
+
 ### 运行态观测的一个重要细节
 
 这个 fork 里：
@@ -223,6 +277,20 @@ cd backend
 - `run_state` 保持 operator / UI 的过程可观测
 
 终态完成后，两者会被自动对齐。
+
+此外，这个 fork 还会在 `world/diagnostics/` 里自动生成三类更高层阅读面：
+
+- `chronicle`：按 tick 串起世界推进主线，主要来自 `state_snapshots.jsonl` 和 `tick_end`
+- `actor board`：把 `checkpoint.json` 的 actor selection / event counts 对齐到 `simulation_config.json` 的 actor
+- `risk digest`：优先列出 `simulation_end.unresolved_events`，没有时回退到 `active_events + queued_events`
+
+也可以单独重生成：
+
+```bash
+./.venv/bin/python scripts/generate_world_reading_surface.py \
+  --simulation-id <simulation_id> \
+  --label final32
+```
 
 ## 模型路由与配置
 
@@ -268,6 +336,7 @@ MiroFish/
 │   └── uploads/
 ├── frontend/
 ├── docs/
+│   ├── operator/
 │   └── showcases/
 ├── llm_registry.json.example
 ├── README.md
@@ -279,6 +348,7 @@ MiroFish/
 - `backend/scripts/`：world run / diagnostics / report / eval 脚本
 - `backend/evals/`：preset、eval suite、playbook、case sets
 - `backend/uploads/simulations/`：实际运行产物
+- `docs/operator/`：operator 工作流、world pack、long-run pipeline 文档
 - `docs/showcases/`：可直接放到 GitHub 上看的 showcase 文档
 
 ## 当前已知边界

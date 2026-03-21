@@ -21,6 +21,13 @@
       </div>
 
       <div class="header-right">
+        <button
+          v-if="worldStoryRoute"
+          class="story-link-btn"
+          @click="router.push(worldStoryRoute)"
+        >
+          世界故事页
+        </button>
         <div class="workflow-step">
           <span class="step-num">Step 4/5</span>
           <span class="step-name">报告生成</span>
@@ -116,6 +123,16 @@ const statusText = computed(() => {
   return 'Generating'
 })
 
+const worldStoryRoute = computed(() => {
+  if (simulationMode.value !== 'world' || !simulationId.value) {
+    return null
+  }
+  return {
+    name: 'WorldStory',
+    params: { simulationId: simulationId.value }
+  }
+})
+
 // --- Helpers ---
 const addLog = (msg) => {
   const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '.' + new Date().getMilliseconds().toString().padStart(3, '0')
@@ -148,6 +165,7 @@ const loadReportData = async () => {
     if (reportRes.success && reportRes.data) {
       const reportData = reportRes.data
       simulationId.value = reportData.simulation_id
+      simulationMode.value = reportData.simulation_mode || simulationMode.value
       
       if (simulationId.value) {
         // 获取 simulation 信息
@@ -204,8 +222,10 @@ const refreshGraph = () => {
 
 // Watch route params
 watch(() => route.params.reportId, (newId) => {
-  if (newId && newId !== currentReportId.value) {
-    currentReportId.value = newId
+  if (newId) {
+    if (newId !== currentReportId.value) {
+      currentReportId.value = newId
+    }
     loadReportData()
   }
 }, { immediate: true })
@@ -282,6 +302,24 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
+}
+
+.story-link-btn {
+  border: 1px solid #111;
+  background: #111;
+  color: #FFF;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.story-link-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
 }
 
 .workflow-step {

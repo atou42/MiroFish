@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-World-mode operator CLI: run, resume, restore, finalize, staged, status.
+World-mode operator CLI: compile-pack, run, resume, restore, finalize, staged,
+pipeline, status.
 """
 
 import argparse
@@ -19,8 +20,10 @@ sys.path.insert(0, _backend_dir)
 sys.path.insert(0, _project_root)
 
 from app.config import Config
+from app.services.world_pack_compiler import WorldPackCompiler
 from app.services.simulation_runner import RunnerStatus, SimulationRunner
 from app.utils.world_run_lock import inspect_world_run_lease, world_run_paths_for_config
+from scripts.run_world_pipeline import _parse_stage_rounds, run_world_pipeline
 from scripts.run_world_simulation import restore_world_checkpoint_from_logs
 from scripts.run_world_staged_experiment import (
     DEFAULT_REPORT_TIMEOUT_SECONDS,
@@ -289,6 +292,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="World run operator")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    compile_parser = subparsers.add_parser("compile-pack")
+    compile_parser.add_argument("--source-dir", required=True)
+    compile_parser.add_argument("--simulation-requirement", default="")
+    compile_parser.add_argument("--simulation-id", default="")
+    compile_parser.add_argument("--project-id", default="")
+    compile_parser.add_argument("--graph-id", default="")
+    compile_parser.add_argument("--world-preset", default="")
+    compile_parser.add_argument("--pack-id", default="")
+    compile_parser.add_argument("--pack-title", default="")
+    compile_parser.add_argument("--no-llm-profiles", action="store_true")
+    compile_parser.add_argument("--use-llm-config", action="store_true")
+    compile_parser.add_argument("--profile-parallel-count", type=int, default=3)
+
     for name in ("run", "resume", "restore", "status"):
         sub = subparsers.add_parser(name)
         sub.add_argument("--config", default="")
@@ -314,7 +330,37 @@ def main() -> None:
     staged_parser.add_argument("--final-rounds", type=int, default=16)
     staged_parser.add_argument("--report-timeout-seconds", type=float, default=DEFAULT_REPORT_TIMEOUT_SECONDS)
 
+    pipeline_parser = subparsers.add_parser("pipeline")
+    pipeline_parser.add_argument("--simulation-id", required=True)
+    pipeline_parser.add_argument(
+        "--stage-rounds",
+        action="append",
+        required=True,
+        help="Comma-separated stage targets, for example 8,16,32 or repeat the flag.",
+    )
+    pipeline_parser.add_argument("--label-prefix", default="stage")
+    pipeline_parser.add_argument("--report-timeout-seconds", type=float, default=DEFAULT_REPORT_TIMEOUT_SECONDS)
+    pipeline_parser.add_argument("--skip-reports", action="store_true")
+
     args = parser.parse_args()
+
+    if args.command == "compile-pack":
+        compiler = WorldPackCompiler()
+        result = compiler.compile(
+            source_dir=args.source_dir,
+            simulation_requirement=args.simulation_requirement,
+            simulation_id=args.simulation_id,
+            project_id=args.project_id,
+            graph_id=args.graph_id,
+            world_preset_id=args.world_preset or None,
+            pack_id=args.pack_id,
+            pack_title=args.pack_title,
+            use_llm_for_profiles=not args.no_llm_profiles,
+            use_llm_for_config=args.use_llm_config,
+            profile_parallel_count=args.profile_parallel_count,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
 
     if args.command in {"run", "resume"}:
         config_path = _resolve_config_path(args.config, args.simulation_id)
@@ -369,6 +415,17 @@ def main() -> None:
             stage1_rounds=args.stage1_rounds,
             final_rounds=args.final_rounds,
             report_timeout_seconds=args.report_timeout_seconds,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "pipeline":
+        result = run_world_pipeline(
+            simulation_id=args.simulation_id,
+            stage_rounds=_parse_stage_rounds(args.stage_rounds),
+            label_prefix=args.label_prefix,
+            report_timeout_seconds=args.report_timeout_seconds,
+            skip_reports=args.skip_reports,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return

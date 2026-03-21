@@ -2,6 +2,16 @@
 
 This page promotes real world runs from this fork into shareable, reviewable showcase material instead of leaving everything trapped in local `backend/uploads/` artifacts.
 
+## Reading Surface And Entry Point
+
+| World Story Surface | World Report Entry |
+|---|---|
+| ![World story hero](./assets/world-story-hero.png) | ![World report entry](./assets/world-report-entry.png) |
+
+- the `world story` page compresses runtime artifacts into a readable five-layer surface: `hero / episodes / factions / risks / process`
+- the `report` page now exposes a visible "世界故事页" entry for world cases instead of relying on manual route construction
+- the primary showcase case can be opened directly at `/world-story/sim_8ac60f042d62`
+
 ## Case 1: 240-tick long-running world progression
 
 - Simulation ID: `sim_8ac60f042d62`
