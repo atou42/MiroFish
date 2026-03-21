@@ -1,6 +1,6 @@
 {
   "name": "mirofish",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MiroFish - 简洁通用的群体智能引擎，预测万物",
   "scripts": {
     "setup": "npm install && cd frontend && npm install",

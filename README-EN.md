@@ -1,242 +1,303 @@
 <div align="center">
 
-<img src="./static/image/MiroFish_logo_compressed.jpeg" alt="MiroFish Logo" width="75%"/>
+<img src="./static/image/MiroFish_logo_compressed.jpeg" alt="MiroFish Logo" width="72%"/>
 
-<a href="https://trendshift.io/repositories/16144" target="_blank"><img src="https://trendshift.io/api/badge/repositories/16144" alt="666ghj%2FMiroFish | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+# MiroFish World Fork
 
-简洁通用的群体智能引擎，预测万物
-</br>
-<em>A Simple and Universal Swarm Intelligence Engine, Predicting Anything</em>
-
-<a href="https://www.shanda.com/" target="_blank"><img src="./static/image/shanda_logo.png" alt="666ghj%2MiroFish | Shanda" height="40"/></a>
-
-[![GitHub Stars](https://img.shields.io/github/stars/666ghj/MiroFish?style=flat-square&color=DAA520)](https://github.com/666ghj/MiroFish/stargazers)
-[![GitHub Watchers](https://img.shields.io/github/watchers/666ghj/MiroFish?style=flat-square)](https://github.com/666ghj/MiroFish/watchers)
-[![GitHub Forks](https://img.shields.io/github/forks/666ghj/MiroFish?style=flat-square)](https://github.com/666ghj/MiroFish/network)
-[![Docker](https://img.shields.io/badge/Docker-Build-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/666ghj/MiroFish)
-
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord&logoColor=white)](http://discord.gg/ePf5aPaHnA)
-[![X](https://img.shields.io/badge/X-Follow-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/mirofish_ai)
-[![Instagram](https://img.shields.io/badge/Instagram-Follow-E4405F?style=flat-square&logo=instagram&logoColor=white)](https://www.instagram.com/mirofish_ai/)
+A MiroFish fork focused on long-running world simulation: multi-model routing, checkpoint / resume, world presets and evals, operator tooling, and a workflow for persistent world progression.
 
 [English](./README-EN.md) | [中文文档](./README.md)
 
 </div>
 
-## ⚡ Overview
+## Fork Positioning
 
-**MiroFish** is a next-generation AI prediction engine powered by multi-agent technology. By extracting seed information from the real world (such as breaking news, policy drafts, or financial signals), it automatically constructs a high-fidelity parallel digital world. Within this space, thousands of intelligent agents with independent personalities, long-term memory, and behavioral logic freely interact and undergo social evolution. You can inject variables dynamically from a "God's-eye view" to precisely deduce future trajectories — **rehearse the future in a digital sandbox, and win decisions after countless simulations**.
+- Upstream project: [`666ghj/MiroFish`](https://github.com/666ghj/MiroFish)
+- This repository keeps the GitHub fork relationship and extends the upstream with a much stronger `world mode` runtime
+- License remains `AGPL-3.0`
 
-> You only need to: Upload seed materials (data analysis reports or interesting novel stories) and describe your prediction requirements in natural language</br>
-> MiroFish will return: A detailed prediction report and a deeply interactive high-fidelity digital world
+If you want the original positioning of MiroFish as a broad multi-agent prediction engine, read upstream.  
+If you want "given lore, actors, conflicts, and rules, keep the world advancing over time with checkpoint / resume / eval / diagnostics", this fork is the more accurate entry point.
 
-### Our Vision
+## What This Fork Actually Focuses On
 
-MiroFish is dedicated to creating a swarm intelligence mirror that maps reality. By capturing the collective emergence triggered by individual interactions, we break through the limitations of traditional prediction:
+- Treating `world mode` as a first-class runtime
+- Hardening the full `checkpoint -> resume -> restore -> finalize` chain
+- Operator CLI for world runs:
+  - `run`
+  - `resume`
+  - `status`
+  - `restore`
+  - `finalize`
+  - `staged`
+- Better runtime observability:
+  - `run_state.json`
+  - `world/checkpoint.json`
+  - `world/actions.jsonl`
+  - `world/state_snapshots.jsonl`
+  - `world/diagnostics/*.md|json`
+- Multi-provider / multi-model routing:
+  - `llm_registry.json`
+  - OpenClaw config reuse
+  - per-agent `llm_selector` in world mode
+- Presets and evals for repeatable strategy selection:
+  - `backend/evals/world_runtime_presets.json`
+  - `backend/evals/world_model_eval_*.json`
+  - `backend/evals/world_case_sets/*.json`
 
-- **At the Macro Level**: We are a rehearsal laboratory for decision-makers, allowing policies and public relations to be tested at zero risk
-- **At the Micro Level**: We are a creative sandbox for individual users — whether deducing novel endings or exploring imaginative scenarios, everything can be fun, playful, and accessible
+## Good Fits
 
-From serious predictions to playful simulations, we let every "what if" see its outcome, making it possible to predict anything.
+- worldbuilding progression
+- long-form story sandboxes
+- multi-faction or multi-character conflict simulation
+- political / geopolitical / rumor-propagation style worlds
+- long-running simulations that need resume, diagnostics, and reviewability
 
-## 🌐 Live Demo
+## Showcase
 
-Welcome to visit our online demo environment and experience a prediction simulation on trending public opinion events we've prepared for you: [mirofish-live-demo](https://666ghj.github.io/mirofish-demo/)
+Detailed cases: [docs/showcases/world-mode-runs.en.md](./docs/showcases/world-mode-runs.en.md)
 
-## 📸 Screenshots
+Two representative runs are already documented:
 
-<div align="center">
-<table>
-<tr>
-<td><img src="./static/image/Screenshot/运行截图1.png" alt="Screenshot 1" width="100%"/></td>
-<td><img src="./static/image/Screenshot/运行截图2.png" alt="Screenshot 2" width="100%"/></td>
-</tr>
-<tr>
-<td><img src="./static/image/Screenshot/运行截图3.png" alt="Screenshot 3" width="100%"/></td>
-<td><img src="./static/image/Screenshot/运行截图4.png" alt="Screenshot 4" width="100%"/></td>
-</tr>
-<tr>
-<td><img src="./static/image/Screenshot/运行截图5.png" alt="Screenshot 5" width="100%"/></td>
-<td><img src="./static/image/Screenshot/运行截图6.png" alt="Screenshot 6" width="100%"/></td>
-</tr>
-</table>
-</div>
+| Case | Date | Scale | Result |
+|------|------|------|--------|
+| `sim_8ac60f042d62` | 2026-03-21 | 240 ticks | Long-running world simulation completed with `3594` action rows, `142` accepted intents, and `0` resolver salvages |
+| `sim_world_supervised_smoke_20260321_172346` | 2026-03-21 | 2 ticks | Operator-path smoke completed with consistent `run_state / checkpoint / status` outputs |
 
-## 🎬 Demo Videos
+Why both matter:
 
-### 1. Wuhan University Public Opinion Simulation + MiroFish Project Introduction
+- `sim_8ac60f042d62` proves the world can be advanced for a long horizon, not just demo bursts
+- `sim_world_supervised_smoke_20260321_172346` proves the operator path is observable while running and auditable after completion
 
-<div align="center">
-<a href="https://www.bilibili.com/video/BV1VYBsBHEMY/" target="_blank"><img src="./static/image/武大模拟演示封面.png" alt="MiroFish Demo Video" width="75%"/></a>
+## Recommended Runtime Strategies
 
-Click the image to watch the complete demo video for prediction using BettaFish-generated "Wuhan University Public Opinion Report"
-</div>
+After the current eval round, the practical default strategies are:
 
-### 2. Dream of the Red Chamber Lost Ending Simulation
+| Preset | Actor | Resolver | Best For |
+|--------|-------|----------|----------|
+| `recommended_throughput` | `eval_aliyun_qwen35_flash` | `eval_aliyun_qwen35_plus` | default throughput-oriented world progression |
+| `recommended_stable` | `eval_aliyun_qwen35_flash` | `eval_litellm_gpt54_deep` | more stable and easier-to-review critical runs |
+| `smoke_benchmark_minimax` | `eval_aliyun_qwen35_flash` | MiniMax smoke resolver | smoke and triage only, not the long-run default |
 
-<div align="center">
-<a href="https://www.bilibili.com/video/BV1cPk3BBExq" target="_blank"><img src="./static/image/红楼梦模拟推演封面.jpg" alt="MiroFish Demo Video" width="75%"/></a>
+See:
 
-Click the image to watch MiroFish's deep prediction of the lost ending based on hundreds of thousands of words from the first 80 chapters of "Dream of the Red Chamber"
-</div>
+- [backend/evals/world_runtime_presets.json](./backend/evals/world_runtime_presets.json)
+- [backend/evals/README.md](./backend/evals/README.md)
+- [backend/evals/world_model_eval_playbook.md](./backend/evals/world_model_eval_playbook.md)
 
-> **Financial Prediction**, **Political News Prediction** and more examples coming soon...
+## Quick Start
 
-## 🔄 Workflow
+### 1. Requirements
 
-1. **Graph Building**: Seed extraction & Individual/collective memory injection & GraphRAG construction
-2. **Environment Setup**: Build different runtimes by mode. Social mode produces Twitter/Reddit agents; world mode produces world entity cards, progression rules, and plot threads
-3. **Simulation**: Social mode runs dual-platform diffusion; world mode runs multi-round world-event progression
-4. **Report Generation**: ReportAgent with rich toolset for deep interaction with post-simulation environment
-5. **Deep Interaction**: Social mode supports agent interviews plus ReportAgent; world mode keeps ReportAgent as the default analysis surface over logs, graph context, and the generated report
+| Tool | Version |
+|------|---------|
+| Node.js | `18+` |
+| Python | `>=3.11` |
+| uv | latest |
 
-## 🚀 Quick Start
-
-### Option 1: Source Code Deployment (Recommended)
-
-#### Prerequisites
-
-| Tool | Version | Description | Check Installation |
-|------|---------|-------------|-------------------|
-| **Node.js** | 18+ | Frontend runtime, includes npm | `node -v` |
-| **Python** | ≥3.11, ≤3.12 | Backend runtime | `python --version` |
-| **uv** | Latest | Python package manager | `uv --version` |
-
-#### 1. Configure Environment Variables
+### 2. Configure Environment
 
 ```bash
-# Copy the example configuration file
 cp .env.example .env
-
-# Edit the .env file and fill in the required API keys
+cp llm_registry.json.example llm_registry.json
 ```
 
-**Recommended Setup:**
+The recommended setup is OpenClaw + `llm_registry.json` as the model/provider source of truth.
 
-Prefer using OpenClaw as the single source of truth for providers / models, and keep `llm_registry.json` for route mapping plus speed / reasoning overrides.
-The repo includes `llm_registry.json.example` as a template. Copy it to `llm_registry.json` locally and edit it.
-
-**Minimum `.env` entries:**
+Minimum suggested `.env`:
 
 ```env
-# Registry source and path (recommended)
 LLM_REGISTRY_SOURCE=auto
 LLM_REGISTRY_PATH=/absolute/path/to/MiroFish/llm_registry.json
 OPENCLAW_CONFIG_PATH=/Users/<you>/.openclaw/openclaw.json
 
-# LLM API configuration (legacy fallback; only used if OpenClaw / registry resolution misses)
-LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_MODEL_NAME=gpt-5.4
-
-# Optional second provider for concurrent agents / parallel simulation
-LLM_BOOST_API_KEY=
-LLM_BOOST_BASE_URL=
-LLM_BOOST_MODEL_NAME=
-
-# Zep Cloud Configuration
-# Free monthly quota is sufficient for simple usage: https://app.getzep.com/
+# Still required in the current backend runtime
 ZEP_API_KEY=your_zep_api_key
+
+# Legacy fallback only when registry / OpenClaw resolution misses
+LLM_API_KEY=
+LLM_BASE_URL=
+LLM_MODEL_NAME=
 ```
 
-`llm_registry.json` now supports:
-- multiple providers
-- multiple model profiles
-- route-based model assignment for different agents / services
-- per-world-agent selection through `llm_selector`
-- direct OpenClaw reuse:
-  - `openclaw_agent`: reuse the primary model of an OpenClaw agent
-  - `openclaw_model`: use a full `provider/model` selector
-  - `openclaw_alias`: reuse an alias from `agents.defaults.models.*.alias`
-
-Resolution order:
-- explicit `openclaw:` selector
-- `llm_registry.json`
-- OpenClaw default model / same-named agent
-- legacy `LLM_* / WORLD_*_LLM_*`
-
 Notes:
-- The current MiroFish backend still uses the OpenAI SDK, so it can only directly reuse OpenClaw providers that expose an OpenAI-compatible API.
-- If `llm_registry.json` is absent, the system can still read the default model directly from `OPENCLAW_CONFIG_PATH`.
 
-#### 2. Install Dependencies
+- `ZEP_API_KEY` is still part of the current runtime path
+- `llm_registry.json` supports multiple providers, profiles, and routes
+- world actors can pick a model with `llm_selector`
+- you can reuse OpenClaw model definitions instead of hardcoding all model choices in `.env`
+
+### 3. Install Dependencies
 
 ```bash
-# One-click installation of all dependencies (root + frontend + backend)
 npm run setup:all
 ```
 
-Or install step by step:
+If you only care about backend / world CLI:
 
 ```bash
-# Install Node dependencies (root + frontend)
-npm run setup
-
-# Install Python dependencies (backend, auto-creates virtual environment)
 npm run setup:backend
 ```
 
-#### 3. Start Services
+### 4. Start the App
 
 ```bash
-# Start both frontend and backend (run from project root)
 npm run dev
 ```
 
-**Service URLs:**
+Default endpoints:
+
 - Frontend: `http://localhost:3000`
-- Backend API: `http://localhost:5001`
+- Backend: `http://localhost:5001`
 
-#### 4. Choose a Mode
+### 5. Prepare a World Simulation
 
-- **Social Mode**: Upload news, policy drafts, or public-opinion material, then ask how attention will spread or evolve. MiroFish will prepare Twitter/Reddit agents and keep interview access in the final stage.
-- **World Mode**: Upload lore, character sheets, story outlines, or system rules, then ask how the world should continue to evolve. MiroFish will prepare a dedicated world runtime, generate progression rounds, and expose the outcome through event feeds plus ReportAgent analysis.
-- **Current Limitation**: World mode does not enable the live interview environment; deep interaction is intentionally routed through ReportAgent only.
+Typical flow:
 
-**Start Individually:**
+1. Upload lore, character sheets, story notes, and world rules
+2. Choose `World Mode`
+3. Let the system produce a `simulation_config.json`
+4. Run from UI or switch to the CLI/operator workflow for longer supervised runs
 
-```bash
-npm run backend   # Start backend only
-npm run frontend  # Start frontend only
-```
+## World CLI / Operator Workflow
 
-### Option 2: Docker Deployment
+If you already have a prepared `simulation_config.json`, you can run it directly:
 
 ```bash
-# 1. Configure environment variables (same as source deployment)
-cp .env.example .env
+cd backend
 
-# 2. Pull image and start
-docker compose up -d
+./.venv/bin/python scripts/world_run.py run \
+  --config /absolute/path/to/simulation_config.json \
+  --max-rounds 8
 ```
 
-Reads `.env` from root directory by default, maps ports `3000 (frontend) / 5001 (backend)`
+Resume:
 
-> Mirror address for faster pulling is provided as comments in `docker-compose.yml`, replace if needed.
+```bash
+./.venv/bin/python scripts/world_run.py resume \
+  --config /absolute/path/to/simulation_config.json \
+  --max-rounds 16
+```
 
-## 📬 Join the Conversation
+Status:
 
-<div align="center">
-<img src="./static/image/QQ群.png" alt="QQ Group" width="60%"/>
-</div>
+```bash
+./.venv/bin/python scripts/world_run.py status \
+  --config /absolute/path/to/simulation_config.json
+```
 
-&nbsp;
+Diagnostics:
 
-The MiroFish team is recruiting full-time/internship positions. If you're interested in multi-agent simulation and LLM applications, feel free to send your resume to: **mirofish@shanda.com**
+```bash
+./.venv/bin/python scripts/world_run_diagnostics.py \
+  --simulation-id <simulation_id> \
+  --label run16
+```
 
-## 📄 Acknowledgments
+Finalize report:
 
-**MiroFish has received strategic support and incubation from Shanda Group!**
+```bash
+./.venv/bin/python scripts/world_run.py finalize \
+  --simulation-id <simulation_id> \
+  --label final16
+```
 
-MiroFish's simulation engine is powered by **[OASIS (Open Agent Social Interaction Simulations)](https://github.com/camel-ai/oasis)**, We sincerely thank the CAMEL-AI team for their open-source contributions!
+Run in staged form, for example `8 -> 16`:
 
-## 📈 Project Statistics
+```bash
+./.venv/bin/python scripts/world_run.py staged \
+  --simulation-id <simulation_id> \
+  --stage1-rounds 8 \
+  --final-rounds 16
+```
 
-<a href="https://www.star-history.com/#666ghj/MiroFish&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&legend=top-left" />
- </picture>
-</a>
+### One Important Observability Detail
+
+In this fork:
+
+- `run_state.json` is the live state consumed by the service / UI side
+- `checkpoint.json` is the authoritative last committed tick
+
+That means `run_state` can legitimately be ahead of `checkpoint` while a tick is still executing.  
+This is intentional:
+
+- `checkpoint` stays clean at commit boundaries
+- `run_state` stays useful for live operator visibility
+
+Once the run reaches a terminal state, they are reconciled automatically.
+
+## Model Routing and Configuration
+
+This fork is not designed around a single global `LLM_API_KEY / LLM_MODEL_NAME` pair for all agents.
+
+The intended setup is:
+
+1. `llm_registry.json` for providers, profiles, and routes
+2. OpenClaw as the shared model/config source of truth
+3. world presets and selectors for role-specific model assignment
+
+Start here:
+
+- [llm_registry.json.example](./llm_registry.json.example)
+- [backend/evals/world_runtime_presets.json](./backend/evals/world_runtime_presets.json)
+- [backend/app/services/world_preset_registry.py](./backend/app/services/world_preset_registry.py)
+
+## Eval System
+
+This fork tries to make world strategy selection reproducible, not gut-feel based.
+
+Key references:
+
+- [backend/evals/README.md](./backend/evals/README.md)
+- [backend/evals/world_model_eval_playbook.md](./backend/evals/world_model_eval_playbook.md)
+- [backend/evals/world_case_sets/README.md](./backend/evals/world_case_sets/README.md)
+
+Key scripts:
+
+- [backend/scripts/eval_world_models.py](./backend/scripts/eval_world_models.py)
+- [backend/scripts/run_world_model_eval_campaign.py](./backend/scripts/run_world_model_eval_campaign.py)
+- [backend/scripts/run_world_model_eval_stage.py](./backend/scripts/run_world_model_eval_stage.py)
+- [backend/scripts/eval_world_strategy.py](./backend/scripts/eval_world_strategy.py)
+
+## Repository Layout
+
+```text
+MiroFish/
+├── backend/
+│   ├── app/
+│   ├── evals/
+│   ├── scripts/
+│   └── uploads/
+├── frontend/
+├── docs/
+│   └── showcases/
+├── llm_registry.json.example
+├── README.md
+└── README-EN.md
+```
+
+The directories you will touch most often:
+
+- `backend/scripts/`: world run / diagnostics / report / eval scripts
+- `backend/evals/`: presets, eval suites, playbooks, case sets
+- `backend/uploads/simulations/`: runtime artifacts
+- `docs/showcases/`: shareable showcase pages that belong in Git
+
+## Current Boundaries
+
+- deep world interaction is still centered on `ReportAgent`, not live character interviews
+- tick-level checkpoints are only written at commit points, so mid-tick visibility mainly lives in `run_state.json`
+- world runtime quality still depends materially on provider health and model structured-output behavior
+- this fork now has much better diagnostics, evals, and playbooks, but it is still not a zero-ops system
+
+## Upstream and Credits
+
+- Upstream: [`666ghj/MiroFish`](https://github.com/666ghj/MiroFish)
+- Simulation engine roots: [`camel-ai/oasis`](https://github.com/camel-ai/oasis)
+
+The goal of this fork is not to erase upstream.  
+It is to keep the relationship visible, preserve the license, and keep pushing the world-simulation line forward.
+
+## License
+
+This repository continues to use the upstream license: `AGPL-3.0`
