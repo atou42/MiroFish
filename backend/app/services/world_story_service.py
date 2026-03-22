@@ -97,6 +97,7 @@ class WorldStoryService:
         diagnostics_dir = world_dir / "diagnostics"
 
         config = _load_json(sim_dir / "simulation_config.json")
+        fork_meta = _load_json(sim_dir / "fork_meta.json")
         checkpoint = _load_json(world_dir / "checkpoint.json")
         diagnostics_path = _latest_diagnostics_summary_path(diagnostics_dir)
         diagnostics = _load_json(diagnostics_path) if diagnostics_path else {}
@@ -139,6 +140,11 @@ class WorldStoryService:
                 "report_id": report.report_id if report else None,
                 "report_title": report_title,
                 "report_summary": report_summary,
+                "fork_origin": (
+                    fork_meta.get("fork_origin")
+                    if isinstance(fork_meta.get("fork_origin"), dict)
+                    else config.get("fork_origin")
+                ),
                 "source_paths": {
                     "diagnostics_json": str(diagnostics_path) if diagnostics_path else "",
                     "chronicle_json": str(chronicle_path) if chronicle_path else "",

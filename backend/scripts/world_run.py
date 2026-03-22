@@ -24,7 +24,7 @@ from app.services.world_pack_compiler import WorldPackCompiler
 from app.services.simulation_runner import RunnerStatus, SimulationRunner
 from app.utils.world_run_lock import inspect_world_run_lease, world_run_paths_for_config
 from scripts.run_world_pipeline import _parse_stage_rounds, run_world_pipeline
-from scripts.run_world_simulation import restore_world_checkpoint_from_logs
+from scripts.run_world_simulation import fork_world_simulation_from_logs, restore_world_checkpoint_from_logs
 from scripts.run_world_staged_experiment import (
     DEFAULT_REPORT_TIMEOUT_SECONDS,
     generate_world_report_with_fallback,
@@ -318,6 +318,12 @@ def main() -> None:
             sub.add_argument("--tick", type=int, required=True)
             sub.add_argument("--output", default="")
 
+    fork_parser = subparsers.add_parser("fork")
+    fork_parser.add_argument("--config", default="")
+    fork_parser.add_argument("--simulation-id", default="")
+    fork_parser.add_argument("--tick", type=int, required=True)
+    fork_parser.add_argument("--new-simulation-id", default="")
+
     finalize_parser = subparsers.add_parser("finalize")
     finalize_parser.add_argument("--simulation-id", required=True)
     finalize_parser.add_argument("--label", required=True)
@@ -390,6 +396,20 @@ def main() -> None:
             tick=args.tick,
             output_path=args.output,
             in_place=not bool(args.output),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "fork":
+        config_path = _resolve_config_path(args.config, args.simulation_id)
+        result = fork_world_simulation_from_logs(
+            config_path=config_path,
+            tick=args.tick,
+            new_simulation_id=args.new_simulation_id,
+        )
+        SimulationRunner.refresh_world_run_state_from_artifacts(
+            result["new_simulation_id"],
+            persist=True,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return

@@ -12,15 +12,18 @@ The runtime advances a shared world by ticks. On each tick it:
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import random
 import re
+import shutil
 import signal
 import sys
 import tempfile
 import time
 import traceback
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
@@ -572,6 +575,7 @@ class WorldSimulationRuntime:
         self.world_state_path = os.path.join(self.world_dir, "world_state.json")
         self.checkpoint_path = os.path.join(self.world_dir, "checkpoint.json")
         self.stop_request_path = os.path.join(self.world_dir, "stop.request.json")
+        self.stimuli_path = os.path.join(self.world_dir, "stimuli.json")
 
         time_config = self.config.get("time_config", {})
         configured_rounds = safe_int(
@@ -758,6 +762,7 @@ class WorldSimulationRuntime:
         self.completed_events: List[WorldEvent] = []
         self.world_state = self._build_initial_state()
         self.last_snapshot: Dict[str, Any] = {}
+        self.applied_stimuli_ids: set[str] = set()
         self.actor_last_selected_tick: Dict[int, int] = {}
         self.actor_last_event_tick: Dict[int, int] = {}
         self.actor_selection_counts: Dict[int, int] = {}
@@ -818,6 +823,7 @@ class WorldSimulationRuntime:
             "completed_events": [event.to_state_dict() for event in self.completed_events],
             "world_state": self.world_state,
             "last_snapshot": self.last_snapshot,
+            "applied_stimuli_ids": sorted(self.applied_stimuli_ids),
             "actor_last_selected_tick": self.actor_last_selected_tick,
             "actor_last_event_tick": self.actor_last_event_tick,
             "actor_selection_counts": self.actor_selection_counts,
@@ -878,6 +884,11 @@ class WorldSimulationRuntime:
                 self.completed_events.append(event)
 
         self.last_snapshot = payload.get("last_snapshot") or {}
+        self.applied_stimuli_ids = set(
+            str(item).strip()
+            for item in ensure_list(payload.get("applied_stimuli_ids"))
+            if str(item).strip()
+        )
         self.actor_last_selected_tick = json_keyed_int_dict(payload.get("actor_last_selected_tick"))
         self.actor_last_event_tick = json_keyed_int_dict(payload.get("actor_last_event_tick"))
         self.actor_selection_counts = json_keyed_int_dict(payload.get("actor_selection_counts"))
@@ -981,6 +992,228 @@ class WorldSimulationRuntime:
 
         with open(self.snapshots_log, "w", encoding="utf-8") as f:
             f.writelines(kept_lines)
+
+    def _stimulus_id(self, stimulus: Dict[str, Any]) -> str:
+        raw = str(
+            stimulus.get("stimulus_id")
+            or stimulus.get("id")
+            or stimulus.get("name")
+            or ""
+        ).strip()
+        if raw:
+            return raw
+        tick = safe_int(stimulus.get("tick", 0), default=0, lower=0)
+        title = str(stimulus.get("title") or "").strip()
+        summary = str(stimulus.get("summary") or "").strip()
+        signature = f"{tick}\n{title}\n{summary}".encode("utf-8")
+        return f"auto_{hashlib.sha1(signature).hexdigest()[:12]}"
+
+    def _load_stimuli(self) -> List[Dict[str, Any]]:
+        combined: List[Dict[str, Any]] = []
+        for item in ensure_list(self.config.get("stimuli")):
+            if isinstance(item, dict):
+                combined.append(dict(item))
+        if os.path.exists(self.stimuli_path):
+            try:
+                with open(self.stimuli_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            except Exception:
+                payload = None
+            if isinstance(payload, list):
+                file_items = payload
+            elif isinstance(payload, dict):
+                file_items = ensure_list(payload.get("stimuli"))
+            else:
+                file_items = []
+            for item in file_items:
+                if isinstance(item, dict):
+                    combined.append(dict(item))
+
+        seen: set[str] = set()
+        deduped: List[Dict[str, Any]] = []
+        for item in combined:
+            stimulus_id = self._stimulus_id(item)
+            if stimulus_id in seen:
+                continue
+            seen.add(stimulus_id)
+            deduped.append(item)
+        return deduped
+
+    def _stimulus_event_id(self, tick: int, stimulus_id: str) -> str:
+        stable = hashlib.sha1(str(stimulus_id).encode("utf-8")).hexdigest()[:10]
+        return f"event_{tick}_stim{stable}"
+
+    def _event_from_stimulus(self, tick: int, stimulus: Dict[str, Any]) -> WorldEvent:
+        stimulus_id = self._stimulus_id(stimulus)
+        title = normalize_optional_text(stimulus.get("title")) or "外部冲击"
+        summary = normalize_optional_text(stimulus.get("summary")) or title
+        location = normalize_optional_text(stimulus.get("location"))[:120]
+        participants = dedupe_keep_order(
+            [str(item).strip() for item in ensure_list(stimulus.get("participants")) if str(item).strip()]
+        )
+        primary_agent_id = safe_int(stimulus.get("primary_agent_id", 0), default=0, lower=0)
+        primary_agent_name = normalize_optional_text(stimulus.get("primary_agent_name")) or "世界事件"
+        priority = safe_int(stimulus.get("priority", 5), default=5, lower=1, upper=5)
+        duration_ticks = safe_int(
+            stimulus.get("duration_ticks", 1),
+            default=1,
+            lower=1,
+            upper=self.max_event_duration,
+        )
+        resolves_at_tick = tick + duration_ticks - 1
+        dependencies = [
+            dep
+            for dep in ensure_list(stimulus.get("dependencies"))
+            if dep in self.active_events or dep in self.queued_events
+        ]
+        return WorldEvent(
+            event_id=self._stimulus_event_id(tick, stimulus_id),
+            tick=tick,
+            title=title[:180],
+            summary=summary[:360],
+            primary_agent_id=primary_agent_id,
+            primary_agent_name=primary_agent_name[:80],
+            participants=(participants or [primary_agent_name])[:8],
+            participant_ids=[primary_agent_id],
+            source_intent_ids=[f"stimulus:{stimulus_id}"],
+            priority=priority,
+            duration_ticks=duration_ticks,
+            resolves_at_tick=resolves_at_tick,
+            status="active",
+            location=location,
+            dependencies=dependencies,
+            state_impacts=self._normalize_state_impacts(stimulus.get("state_impacts")),
+            source="stimulus",
+            rationale=normalize_optional_text(stimulus.get("rationale"))[:220],
+        )
+
+    def _drop_lowest_priority_queued_event(self) -> Optional[WorldEvent]:
+        if not self.queued_events:
+            return None
+        victim = sorted(
+            self.queued_events.values(),
+            key=lambda item: (item.priority, -item.resolves_at_tick, item.event_id),
+        )[0]
+        self.queued_events.pop(victim.event_id, None)
+        return victim
+
+    def _force_activate_event(self, tick: int, event: WorldEvent) -> Dict[str, Any]:
+        diagnostics: Dict[str, Any] = {"mode": "force_active", "preempted_event_id": "", "dropped_queued_event_id": ""}
+        if event.event_id in self.active_events or event.event_id in self.queued_events:
+            diagnostics["mode"] = "already_present"
+            return diagnostics
+
+        if len(self.active_events) < self.max_active_events:
+            event.status = "active"
+            self._accept_event(event)
+            return diagnostics
+
+        if len(self.queued_events) >= self.max_queued_events:
+            dropped = self._drop_lowest_priority_queued_event()
+            if dropped is not None:
+                diagnostics["dropped_queued_event_id"] = dropped.event_id
+                self._write_meta_event(
+                    {
+                        "event_type": "stimulus_queue_drop",
+                        "timestamp": now_iso(),
+                        "simulation_mode": "world",
+                        "round": tick,
+                        "tick": tick,
+                        "dropped_event_id": dropped.event_id,
+                        "dropped_title": dropped.title,
+                        "reason": "queue capacity reached, drop lowest priority queued event",
+                    }
+                )
+
+        preempt_candidates = list(self.active_events.values())
+        if preempt_candidates:
+            victim = sorted(
+                preempt_candidates,
+                key=lambda item: (item.priority, -item.resolves_at_tick, item.event_id),
+            )[0]
+            diagnostics["preempted_event_id"] = victim.event_id
+            self.active_events.pop(victim.event_id, None)
+            victim.status = "queued"
+            victim.tick = tick
+            victim.resolves_at_tick = max(victim.resolves_at_tick, tick + victim.duration_ticks - 1)
+            if len(self.queued_events) < self.max_queued_events:
+                self.queued_events[victim.event_id] = victim
+                self._write_meta_event(
+                    {
+                        "event_type": "stimulus_preempt",
+                        "timestamp": now_iso(),
+                        "simulation_mode": "world",
+                        "round": tick,
+                        "tick": tick,
+                        "preempted_event_id": victim.event_id,
+                        "preempted_title": victim.title,
+                        "reason": "stimulus forced active, demote lowest priority active event",
+                    }
+                )
+
+        event.status = "active"
+        self._accept_event(event)
+        return diagnostics
+
+    def _inject_stimuli(self, tick: int, scene_title: str) -> None:
+        stimuli = self._load_stimuli()
+        for stimulus in stimuli:
+            planned_tick = safe_int(stimulus.get("tick", 0), default=0, lower=0)
+            if planned_tick <= 0 or planned_tick > tick:
+                continue
+            if planned_tick < tick and str(stimulus.get("apply_late", "true")).strip().lower() in {"0", "false", "no", "off"}:
+                continue
+
+            stimulus_id = self._stimulus_id(stimulus)
+            if stimulus_id in self.applied_stimuli_ids:
+                continue
+
+            kind = str(stimulus.get("kind") or stimulus.get("type") or "event").strip().lower()
+            if kind not in {"event", "shock", "incident"}:
+                continue
+
+            event = self._event_from_stimulus(tick, stimulus)
+            mode = str(stimulus.get("inject_mode") or stimulus.get("mode") or "force_active").strip().lower()
+            if mode in {"queued", "queue"}:
+                if len(self.queued_events) >= self.max_queued_events:
+                    dropped = self._drop_lowest_priority_queued_event()
+                    if dropped is not None:
+                        self._write_meta_event(
+                            {
+                                "event_type": "stimulus_queue_drop",
+                                "timestamp": now_iso(),
+                                "simulation_mode": "world",
+                                "round": tick,
+                                "tick": tick,
+                                "dropped_event_id": dropped.event_id,
+                                "dropped_title": dropped.title,
+                                "reason": "queue capacity reached, drop lowest priority queued event",
+                            }
+                        )
+                event.status = "queued"
+                self._accept_event(event)
+                diagnostics = {"mode": "queued", "preempted_event_id": "", "dropped_queued_event_id": ""}
+            else:
+                diagnostics = self._force_activate_event(tick, event)
+
+            self.applied_stimuli_ids.add(stimulus_id)
+            self._write_meta_event(
+                {
+                    "event_type": "stimulus_injected",
+                    "timestamp": now_iso(),
+                    "simulation_mode": "world",
+                    "round": tick,
+                    "tick": tick,
+                    "scene_title": scene_title,
+                    "stimulus_id": stimulus_id,
+                    "stimulus_tick": planned_tick,
+                    "event_id": event.event_id,
+                    "title": event.title,
+                    "inject_mode": diagnostics.get("mode"),
+                    "preempted_event_id": diagnostics.get("preempted_event_id", ""),
+                    "dropped_queued_event_id": diagnostics.get("dropped_queued_event_id", ""),
+                }
+            )
 
     def _build_llm(
         self,
@@ -1428,6 +1661,7 @@ class WorldSimulationRuntime:
             scene_title = self._scene_title(tick)
 
             self._promote_queued_events(tick)
+            self._inject_stimuli(tick, scene_title)
             self._write_meta_event(
                 {
                     "event_type": "tick_start",
@@ -3438,6 +3672,10 @@ class WorldSimulationRuntime:
             upper=self.max_event_duration,
         )
         primary_intent = intent_map[owner_intent_id]
+        resolved_title = self._clean_intent_candidate(
+            str(item.get("title") or ""),
+            agent_name=primary_intent.agent_name,
+        )
         title, summary = self._normalize_text_intent_fields(
             str(item.get("title") or primary_intent.objective or "World event").strip(),
             str(item.get("summary") or primary_intent.summary).strip(),
@@ -3450,6 +3688,15 @@ class WorldSimulationRuntime:
             agent_name=primary_intent.agent_name,
             scene_title="",
         )
+        if (
+            resolved_title
+            and not self._intent_text_is_meta(resolved_title, agent_name=primary_intent.agent_name)
+            and not self._is_placeholder_text(resolved_title)
+        ):
+            # Resolver event titles can legitimately be long continuity labels. Keep
+            # the explicit resolver title instead of reusing actor-intent cleanup
+            # heuristics that may replace it with the summary body.
+            title = resolved_title
         return WorldEvent(
             event_id=self._next_event_id(tick),
             tick=tick,
@@ -5341,12 +5588,15 @@ def restore_world_checkpoint_from_logs(
     actor_selection_counts: Dict[int, int] = {}
     actor_event_counts: Dict[int, int] = {}
     counted_event_ids: set[str] = set()
+    applied_stimuli_ids: set[str] = set()
     completed_event_map: Dict[str, Dict[str, Any]] = {}
     completed_event_order: List[str] = []
     intent_counter = 0
     event_counter = 0
     lifecycle_records = 0
     run_total_rounds = safe_int(existing_checkpoint.get("run_total_rounds"), default=0, lower=0)
+    if run_total_rounds <= 0:
+        run_total_rounds = safe_int(existing_checkpoint.get("target_rounds"), default=0, lower=0)
 
     for row in actions:
         event_type = str(row.get("event_type") or "").strip()
@@ -5362,6 +5612,12 @@ def restore_world_checkpoint_from_logs(
             lifecycle_records += 1
 
         action_args = row.get("action_args") if isinstance(row.get("action_args"), dict) else {}
+        if event_type == "stimulus_injected":
+            stimulus_id = normalize_optional_text(row.get("stimulus_id")) or normalize_optional_text(
+                action_args.get("stimulus_id")
+            )
+            if stimulus_id:
+                applied_stimuli_ids.add(stimulus_id)
         if event_type == "intent_created":
             agent_id = safe_int(action_args.get("agent_id", row.get("agent_id", 0)), default=0, lower=0)
             if agent_id > 0:
@@ -5411,6 +5667,8 @@ def restore_world_checkpoint_from_logs(
             default=0,
             lower=0,
         )
+    if run_total_rounds < target_tick:
+        run_total_rounds = target_tick + 1
 
     base_world_state = build_initial_world_state(
         plot_threads=config.get("plot_threads", []),
@@ -5442,10 +5700,12 @@ def restore_world_checkpoint_from_logs(
         "config_path": config_path,
         "last_completed_tick": target_tick,
         "run_total_rounds": run_total_rounds,
+        "target_rounds": run_total_rounds,
         "minutes_per_round": minutes_per_round,
         "active_events": normalized_active_events,
         "queued_events": normalized_queued_events,
         "completed_events": normalized_completed_events,
+        "applied_stimuli_ids": sorted(applied_stimuli_ids),
         "world_state": base_world_state,
         "last_snapshot": restored_snapshot,
         "actor_last_selected_tick": actor_last_selected_tick,
@@ -5479,10 +5739,279 @@ def restore_world_checkpoint_from_logs(
         "active_events_count": len(normalized_active_events),
         "queued_events_count": len(normalized_queued_events),
         "completed_events_count": len(normalized_completed_events),
+        "applied_stimuli_count": len(applied_stimuli_ids),
         "intent_counter": intent_counter,
         "event_counter": event_counter,
         "lifecycle_records": lifecycle_records,
         "status": checkpoint_payload["status"],
+    }
+
+
+def _jsonl_row_tick(payload: Dict[str, Any]) -> Optional[int]:
+    raw_tick = payload.get("tick")
+    if raw_tick is None:
+        raw_tick = payload.get("round")
+    try:
+        tick = int(raw_tick)
+    except (TypeError, ValueError):
+        return None
+    return tick
+
+
+def _truncate_actions_log_to_tick(source_path: str, destination_path: str, target_tick: int) -> Dict[str, int]:
+    kept = 0
+    dropped = 0
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(f"actions log not found: {source_path}")
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    with open(source_path, "r", encoding="utf-8", errors="ignore") as src, open(
+        destination_path, "w", encoding="utf-8"
+    ) as dst:
+        for raw_line in src:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            tick = _jsonl_row_tick(payload)
+            if tick is not None:
+                if 0 <= tick <= target_tick:
+                    dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    kept += 1
+                else:
+                    dropped += 1
+                continue
+
+            event_type = str(payload.get("event_type") or "").strip()
+            if event_type in {
+                "simulation_resumed",
+                "simulation_end",
+                "simulation_failed",
+                "simulation_interrupted",
+                "simulation_stop_acknowledged",
+            }:
+                dropped += 1
+                continue
+
+            dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            kept += 1
+    return {"kept": kept, "dropped": dropped}
+
+
+def _truncate_snapshots_log_to_tick(source_path: str, destination_path: str, target_tick: int) -> Dict[str, int]:
+    kept = 0
+    dropped = 0
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(f"snapshots log not found: {source_path}")
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    with open(source_path, "r", encoding="utf-8", errors="ignore") as src, open(
+        destination_path, "w", encoding="utf-8"
+    ) as dst:
+        for raw_line in src:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            tick = _jsonl_row_tick(payload)
+            if tick is None:
+                continue
+            if 0 <= tick <= target_tick:
+                dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                kept += 1
+            else:
+                dropped += 1
+    return {"kept": kept, "dropped": dropped}
+
+
+def fork_world_simulation_from_logs(
+    config_path: str,
+    tick: int,
+    *,
+    new_simulation_id: str = "",
+    destination_base_dir: str = "",
+    copy_stimuli: bool = True,
+    include_config_variants: bool = True,
+) -> Dict[str, Any]:
+    config_path = os.path.abspath(config_path)
+    target_tick = safe_int(tick, default=0, lower=1)
+    if target_tick <= 0:
+        raise ValueError("tick must be >= 1")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        source_config = json.load(f)
+    if not isinstance(source_config, dict):
+        raise ValueError(f"invalid world config: {config_path}")
+    if str(source_config.get("simulation_mode") or "").strip().lower() != "world":
+        raise ValueError("only world-mode simulations support fork")
+
+    source_simulation_dir = os.path.dirname(config_path)
+    source_simulation_id = str(source_config.get("simulation_id") or "").strip() or os.path.basename(
+        source_simulation_dir
+    )
+    source_world_dir = os.path.join(source_simulation_dir, "world")
+    source_actions_path = os.path.join(source_world_dir, "actions.jsonl")
+    source_snapshots_path = os.path.join(source_world_dir, "state_snapshots.jsonl")
+    if not os.path.exists(source_actions_path):
+        raise FileNotFoundError(f"missing world actions log: {source_actions_path}")
+    if not os.path.exists(source_snapshots_path):
+        raise FileNotFoundError(f"missing world snapshots log: {source_snapshots_path}")
+
+    destination_base_dir = destination_base_dir or os.path.join(Config.UPLOAD_FOLDER, "simulations")
+    destination_base_dir = os.path.abspath(destination_base_dir)
+    os.makedirs(destination_base_dir, exist_ok=True)
+
+    if not new_simulation_id:
+        new_simulation_id = f"sim_{uuid.uuid4().hex[:12]}"
+    new_simulation_id = str(new_simulation_id).strip()
+    if not new_simulation_id:
+        raise ValueError("new_simulation_id is required")
+
+    destination_simulation_dir = os.path.join(destination_base_dir, new_simulation_id)
+    if os.path.exists(destination_simulation_dir):
+        raise FileExistsError(f"destination simulation already exists: {destination_simulation_dir}")
+
+    forked_at = now_iso()
+    fork_origin = {
+        "source_simulation_id": source_simulation_id,
+        "source_tick": target_tick,
+        "forked_at": forked_at,
+    }
+
+    os.makedirs(destination_simulation_dir, exist_ok=False)
+    destination_world_dir = os.path.join(destination_simulation_dir, "world")
+    os.makedirs(destination_world_dir, exist_ok=True)
+
+    source_profiles_path = os.path.join(source_simulation_dir, "world_profiles.json")
+    if os.path.exists(source_profiles_path):
+        shutil.copy2(source_profiles_path, os.path.join(destination_simulation_dir, "world_profiles.json"))
+
+    config_filenames: List[str] = ["simulation_config.json"]
+    if include_config_variants:
+        for name in os.listdir(source_simulation_dir):
+            if name.startswith("simulation_config.") and name.endswith(".json"):
+                config_filenames.append(name)
+    config_filenames = sorted(set(config_filenames))
+
+    for name in config_filenames:
+        src_path = os.path.join(source_simulation_dir, name)
+        if not os.path.exists(src_path):
+            continue
+        try:
+            with open(src_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload["simulation_id"] = new_simulation_id
+            payload.setdefault("fork_origin", fork_origin)
+            destination_path = os.path.join(destination_simulation_dir, name)
+            with open(destination_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        else:
+            shutil.copy2(src_path, os.path.join(destination_simulation_dir, name))
+
+    source_state_path = os.path.join(source_simulation_dir, "state.json")
+    state_payload: Dict[str, Any] = {}
+    if os.path.exists(source_state_path):
+        try:
+            with open(source_state_path, "r", encoding="utf-8") as f:
+                loaded_state = json.load(f)
+            if isinstance(loaded_state, dict):
+                state_payload = dict(loaded_state)
+        except Exception:
+            state_payload = {}
+    state_payload["simulation_id"] = new_simulation_id
+    state_payload["simulation_mode"] = "world"
+    state_payload["status"] = "ready"
+    state_payload["current_round"] = target_tick
+    state_payload["created_at"] = forked_at
+    state_payload["updated_at"] = forked_at
+    runtime_metadata = (
+        state_payload.get("runtime_metadata") if isinstance(state_payload.get("runtime_metadata"), dict) else {}
+    )
+    runtime_metadata = dict(runtime_metadata)
+    runtime_metadata["fork_origin"] = fork_origin
+    state_payload["runtime_metadata"] = runtime_metadata
+    with open(os.path.join(destination_simulation_dir, "state.json"), "w", encoding="utf-8") as f:
+        json.dump(state_payload, f, ensure_ascii=False, indent=2)
+
+    open(os.path.join(destination_simulation_dir, "simulation.log"), "w", encoding="utf-8").close()
+
+    if copy_stimuli:
+        source_stimuli_path = os.path.join(source_world_dir, "stimuli.json")
+        if os.path.exists(source_stimuli_path):
+            shutil.copy2(source_stimuli_path, os.path.join(destination_world_dir, "stimuli.json"))
+
+    actions_stats = _truncate_actions_log_to_tick(
+        source_actions_path,
+        os.path.join(destination_world_dir, "actions.jsonl"),
+        target_tick,
+    )
+    snapshots_stats = _truncate_snapshots_log_to_tick(
+        source_snapshots_path,
+        os.path.join(destination_world_dir, "state_snapshots.jsonl"),
+        target_tick,
+    )
+
+    source_checkpoint_path = os.path.join(source_world_dir, "checkpoint.json")
+    if os.path.exists(source_checkpoint_path):
+        shutil.copy2(source_checkpoint_path, os.path.join(destination_world_dir, "checkpoint.json"))
+
+    destination_config_path = os.path.join(destination_simulation_dir, "simulation_config.json")
+    restore_result = restore_world_checkpoint_from_logs(
+        config_path=destination_config_path,
+        tick=target_tick,
+        in_place=True,
+    )
+
+    checkpoint_path = os.path.join(destination_world_dir, "checkpoint.json")
+    checkpoint_payload: Dict[str, Any] = {}
+    if os.path.exists(checkpoint_path):
+        try:
+            with open(checkpoint_path, "r", encoding="utf-8") as f:
+                loaded_checkpoint = json.load(f)
+            if isinstance(loaded_checkpoint, dict):
+                checkpoint_payload = loaded_checkpoint
+        except Exception:
+            checkpoint_payload = {}
+    last_snapshot = checkpoint_payload.get("last_snapshot")
+    if isinstance(last_snapshot, dict) and last_snapshot:
+        with open(os.path.join(destination_world_dir, "world_state.json"), "w", encoding="utf-8") as f:
+            json.dump(last_snapshot, f, ensure_ascii=False, indent=2)
+
+    fork_meta = {
+        "fork_origin": fork_origin,
+        "source_config_path": config_path,
+        "source_world_dir": source_world_dir,
+        "destination_simulation_id": new_simulation_id,
+        "destination_simulation_dir": destination_simulation_dir,
+        "restore": restore_result,
+        "actions_truncate": actions_stats,
+        "snapshots_truncate": snapshots_stats,
+    }
+    with open(os.path.join(destination_simulation_dir, "fork_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(fork_meta, f, ensure_ascii=False, indent=2)
+
+    return {
+        "source_simulation_id": source_simulation_id,
+        "source_config_path": config_path,
+        "source_tick": target_tick,
+        "new_simulation_id": new_simulation_id,
+        "new_simulation_dir": destination_simulation_dir,
+        "new_config_path": destination_config_path,
+        "actions_truncate": actions_stats,
+        "snapshots_truncate": snapshots_stats,
+        "restore": restore_result,
     }
 
 

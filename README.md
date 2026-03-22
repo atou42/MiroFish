@@ -215,6 +215,22 @@ cd backend
   --max-rounds 16
 ```
 
+从任意有 snapshot 的历史轮次 fork 出一条平行宇宙：
+
+```bash
+./.venv/bin/python scripts/world_run.py fork \
+  --simulation-id sim_8ac60f042d62 \
+  --tick 280 \
+  --new-simulation-id sim_8ac60f042d62_fork280
+```
+
+它会保留原 simulation，不会回写原目录，而是生成一个新的 simulation 目录，里面已经带好：
+
+- 截断后的 `world/actions.jsonl`
+- 截断后的 `world/state_snapshots.jsonl`
+- 重建后的 `world/checkpoint.json`
+- 可直接继续追加刺激线的 `stimuli.json`
+
 查看状态：
 
 ```bash

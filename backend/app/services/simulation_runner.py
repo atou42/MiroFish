@@ -792,6 +792,11 @@ class SimulationRunner:
                         terminal,
                         completed_at_hint=terminal_hint,
                     )
+        elif checkpoint_meta:
+            state.runner_status = RunnerStatus.IDLE
+            state.world_running = False
+            state.world_completed = False
+            state.process_pid = None
         elif existing_state:
             state.runner_status = existing_state.runner_status
             state.world_running = existing_state.world_running

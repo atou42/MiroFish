@@ -217,6 +217,22 @@ Resume:
   --max-rounds 16
 ```
 
+Fork a parallel timeline from any historical tick that already has a snapshot:
+
+```bash
+./.venv/bin/python scripts/world_run.py fork \
+  --simulation-id sim_8ac60f042d62 \
+  --tick 280 \
+  --new-simulation-id sim_8ac60f042d62_fork280
+```
+
+This keeps the original simulation untouched and creates a new simulation directory with:
+
+- truncated `world/actions.jsonl`
+- truncated `world/state_snapshots.jsonl`
+- rebuilt `world/checkpoint.json`
+- copied `stimuli.json` so the branch can keep diverging on its own
+
 Status:
 
 ```bash

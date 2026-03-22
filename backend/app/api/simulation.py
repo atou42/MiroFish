@@ -20,6 +20,7 @@ from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..utils.logger import get_logger
 from ..models.project import ProjectManager
 from ..models.simulation_mode import SimulationMode
+from scripts.run_world_simulation import fork_world_simulation_from_logs
 
 logger = get_logger('mirofish.api.simulation')
 
@@ -2031,6 +2032,84 @@ def resume_simulation():
 
     except Exception as e:
         logger.error(f"恢复模拟失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@simulation_bp.route('/<simulation_id>/fork', methods=['POST'])
+def fork_world_simulation(simulation_id: str):
+    try:
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": "模拟不存在"
+            }), 404
+        if SimulationMode.normalize(state.simulation_mode).value != SimulationMode.WORLD.value:
+            return jsonify({
+                "success": False,
+                "error": "只有 world 模式支持 fork"
+            }), 400
+
+        data = request.get_json() or {}
+        tick = data.get('tick')
+        new_simulation_id = (data.get('new_simulation_id') or "").strip()
+        try:
+            tick = int(tick)
+        except (TypeError, ValueError):
+            return jsonify({
+                "success": False,
+                "error": "tick 必须是有效的整数"
+            }), 400
+        if tick <= 0:
+            return jsonify({
+                "success": False,
+                "error": "tick 必须大于 0"
+            }), 400
+
+        config_path = os.path.join(
+            Config.UPLOAD_FOLDER,
+            "simulations",
+            simulation_id,
+            "simulation_config.json",
+        )
+        result = fork_world_simulation_from_logs(
+            config_path=config_path,
+            tick=tick,
+            new_simulation_id=new_simulation_id,
+        )
+        SimulationRunner.refresh_world_run_state_from_artifacts(
+            result["new_simulation_id"],
+            persist=True,
+        )
+
+        fork_state = manager.get_simulation(result["new_simulation_id"])
+        response_data = dict(result)
+        if fork_state:
+            response_data["fork_state"] = fork_state.to_dict()
+        return jsonify({
+            "success": True,
+            "data": response_data,
+        })
+
+    except (FileNotFoundError, ValueError) as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
+
+    except FileExistsError as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 409
+
+    except Exception as e:
+        logger.error(f"fork world 模拟失败: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e),
