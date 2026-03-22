@@ -5,6 +5,7 @@ from app.config import Config
 from app.services.simulation_runner import RunnerStatus, SimulationRunState, SimulationRunner
 from app.services.world_report_agent import WorldReportAgent
 from scripts.generate_world_report import validate_report_artifacts
+from scripts import run_world_simulation
 from scripts.run_world_simulation import ActorIntent, WorldSimulationRuntime
 from scripts import world_run
 
@@ -100,6 +101,85 @@ def test_supervised_world_run_auto_resumes_until_target(monkeypatch):
     assert calls == [False, True]
     assert result["auto_resumed"] is True
     assert result["checkpoint"]["last_completed_tick"] == 8
+
+
+def test_resume_from_completed_checkpoint_preserves_extended_target(tmp_path, monkeypatch):
+    config_path = _write_runtime_config(tmp_path)
+    world_dir = config_path.parent / "world"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    (world_dir / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "saved_at": "2026-03-22T00:07:17.313225",
+                "status": "completed",
+                "terminal_status": "completed",
+                "stop_reason": "target_rounds_reached",
+                "simulation_id": "sim_runtime_fix",
+                "config_path": str(config_path),
+                "last_completed_tick": 4,
+                "run_total_rounds": 4,
+                "target_rounds": 4,
+                "minutes_per_round": 60,
+                "active_events": [],
+                "queued_events": [],
+                "completed_events": [],
+                "world_state": {
+                    "tension": 0.8,
+                    "stability": 0.2,
+                    "momentum": 0.9,
+                    "pressure_tracks": {
+                        "conflict": 0.9,
+                        "scarcity": 0.7,
+                        "legitimacy": 0.2,
+                    },
+                    "last_tick_summary": "Tick 4 完成。",
+                },
+                "last_snapshot": {
+                    "tick": 4,
+                    "summary": "Tick 4 完成。",
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(WorldSimulationRuntime, "_build_llm", lambda self, selector=None: None)
+    monkeypatch.setattr(WorldSimulationRuntime, "_get_actor_llm", lambda self, agent=None: None)
+
+    runtime = WorldSimulationRuntime(
+        config_path=str(config_path),
+        max_rounds=8,
+        resume_from_checkpoint=True,
+    )
+
+    assert runtime.last_completed_tick == 4
+    assert runtime.target_rounds == 8
+    assert runtime.total_rounds == 8
+    assert runtime.stop_reason == ""
+    assert runtime.terminal_status == ""
+
+
+def test_write_checkpoint_uses_atomic_replace(tmp_path, monkeypatch):
+    runtime = _build_runtime(tmp_path, monkeypatch)
+    replace_calls = []
+    real_replace = run_world_simulation.os.replace
+
+    def record_replace(src, dst):
+        replace_calls.append((src, dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(run_world_simulation.os, "replace", record_replace)
+
+    runtime._write_checkpoint(status="completed", stop_reason="target_rounds_reached")
+
+    payload = json.loads(Path(runtime.checkpoint_path).read_text(encoding="utf-8"))
+    assert replace_calls
+    assert replace_calls[0][1] == runtime.checkpoint_path
+    assert payload["status"] == "completed"
+    assert payload["stop_reason"] == "target_rounds_reached"
 
 
 def test_invalid_json_intent_prefers_structured_recovery(tmp_path, monkeypatch):

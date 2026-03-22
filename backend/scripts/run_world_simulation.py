@@ -18,6 +18,7 @@ import random
 import re
 import signal
 import sys
+import tempfile
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -832,8 +833,18 @@ class WorldSimulationRuntime:
         if stop_reason:
             self.stop_reason = stop_reason
         self.terminal_status = status if status in {"completed", "failed", "interrupted"} else self.terminal_status
-        with open(self.checkpoint_path, "w", encoding="utf-8") as f:
+        checkpoint_dir = os.path.dirname(self.checkpoint_path) or "."
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=checkpoint_dir,
+            prefix=".checkpoint.",
+            suffix=".json",
+            delete=False,
+        ) as f:
             json.dump(self._checkpoint_payload(status=status), f, ensure_ascii=False, indent=2)
+            temp_path = f.name
+        os.replace(temp_path, self.checkpoint_path)
 
     def _load_checkpoint(self) -> None:
         if not os.path.exists(self.checkpoint_path):
@@ -876,11 +887,23 @@ class WorldSimulationRuntime:
         self._intent_counter = safe_int(payload.get("intent_counter", 0), default=0, lower=0)
         self._lifecycle_records = safe_int(payload.get("lifecycle_records", 0), default=0, lower=0)
         self.last_completed_tick = safe_int(payload.get("last_completed_tick", 0), default=0, lower=0)
+
+        # Preserve explicit resume extensions passed on the CLI. Without this,
+        # a completed checkpoint can overwrite a higher requested target and
+        # immediately short-circuit the resumed run.
+        requested_target_rounds = safe_int(self.target_rounds, default=0, lower=0)
+        checkpoint_target_rounds = safe_int(payload.get("target_rounds", 0), default=0, lower=0)
+        if checkpoint_target_rounds > 0 and requested_target_rounds <= checkpoint_target_rounds:
+            self.target_rounds = checkpoint_target_rounds
+        else:
+            self.target_rounds = max(requested_target_rounds, checkpoint_target_rounds)
+        self.total_rounds = self.target_rounds
+
         self.stop_reason = str(payload.get("stop_reason") or "").strip()
         self.terminal_status = str(payload.get("terminal_status") or payload.get("status") or "").strip()
-        target_rounds = safe_int(payload.get("target_rounds", 0), default=0, lower=0)
-        if target_rounds > 0:
-            self.target_rounds = target_rounds
+        if self.last_completed_tick < self.target_rounds:
+            self.stop_reason = ""
+            self.terminal_status = ""
         max_drain_rounds = safe_int(payload.get("max_drain_rounds", self.max_drain_rounds), default=self.max_drain_rounds, lower=0)
         self.max_drain_rounds = max_drain_rounds
 
