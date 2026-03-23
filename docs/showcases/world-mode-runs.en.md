@@ -10,9 +10,60 @@ This page promotes real world runs from this fork into shareable, reviewable sho
 
 - the `world story` page compresses runtime artifacts into a readable five-layer surface: `hero / episodes / factions / risks / process`
 - the `report` page now exposes a visible "世界故事页" entry for world cases instead of relying on manual route construction
-- the primary showcase case can be opened directly at `/world-story/sim_8ac60f042d62`
+- the primary showcase case can be opened directly at `/world-story/sim_8ac60f042d62_fork384`
 
-## Case 1: 240-tick long-running world progression
+## Case 1: 600-tick forked long-running world progression
+
+- Simulation ID: `sim_8ac60f042d62_fork384`
+- Diagnostics Label: `fork384_r600`
+- Completed At: `2026-03-23T22:55:44`
+- Ticks: `600`
+- Actions Log Rows: `9624`
+- Actor Profile: `eval_aliyun_qwen35_flash`
+- Resolver Profile: `eval_litellm_gpt54_deep`
+
+### Key Metrics
+
+- Accepted Intents: `160`
+- Deferred Intents: `560`
+- Rejected Intents: `84`
+- Resolver Salvaged: `0`
+- Resolver Zero-Accept Diagnostics: `0`
+- Accepted Event Sources:
+  - `llm`: `156`
+  - `llm_invalid_json_recovered`: `4`
+
+### Final World State
+
+- Tension: `0.95`
+- Stability: `0.075`
+- Momentum: `0.95`
+
+Last-round summary:
+
+> Tick 600 ended with 4 actor intents, 3 accepted events, 3 active events, and 6 queued events. The run closed at 0.95 tension, 0.075 stability, and 0.95 momentum.
+
+### What Changed By Tick 600
+
+This case no longer reads like a stress test that merely stayed alive. By tick 600, the world had moved into an actual contest over competing order formation around Gray Stone Port, where escort samples, closed-door merchant talks, covert bookkeeping, CP-0 evidence gathering, and Roger-side contact probes were all advancing at once.
+
+The clearest escalation ladder in the late run was:
+
+- the Holy Land protection-list leak
+- gray-shield escort samples
+- a closed-door non-interference witness line
+- single-voyage priority resupply reservations
+- final settlement and offshore cash parking
+- deeper CP-0 infiltration into the contact network
+- Roger-side legacy contacts lighting back up
+
+### Why This Case Matters
+
+- the world runtime can now sustain a long, high-pressure run while still staying at `0` resolver salvage
+- the output is starting to produce competing institutions and order substitution, not just stacked incidents
+- the fork -> resume -> finalize -> diagnostics path is now proven by a real flagship case
+
+## Case 2: 240-tick long-running world progression
 
 - Simulation ID: `sim_8ac60f042d62`
 - Diagnostics Label: `final240_autorun_clean`
@@ -49,7 +100,7 @@ Last-round summary:
 - checkpoint, diagnostics, and reporting still remain usable after a large run
 - `Qwen 3.5 Flash actor + GPT-5.4 deep resolver` proved viable for a serious reviewed run with low salvage dependence
 
-## Case 2: operator state-bridge smoke
+## Case 3: operator state-bridge smoke
 
 - Simulation ID: `sim_world_supervised_smoke_20260321_172346`
 - Diagnostics Label: `operator_bridge_smoke`

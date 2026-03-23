@@ -66,17 +66,21 @@
 
 - `world story` 页已经把长跑结果整理成可读的展示面：`hero -> episodes -> factions -> risks -> process`
 - `report` 页右上角可直接跳到故事页，不再需要手动拼 URL
-- 对真实 case `sim_8ac60f042d62`，可直接访问：`/world-story/sim_8ac60f042d62`
+- 当前旗舰 case 已可直接访问：`/world-story/sim_8ac60f042d62_fork384`
 
-当前这个 fork 已经沉淀了两类代表性案例：
+当前这个 fork 已经沉淀了三类代表性案例：
 
 | Case | 日期 | 规模 | 结果 |
 |------|------|------|------|
-| `sim_8ac60f042d62` | 2026-03-21 | 240 ticks | 长程 world run 完成，`3594` 条 action log，`142` 个 accepted intents，`0` 次 resolver salvage |
+| `sim_8ac60f042d62_fork384` | 2026-03-23 | 600 ticks | 旗舰 world run 完成，`9624` 条 action log，`160` 个 accepted intents，`0` 次 resolver salvage，终局张力 / 稳定 / 动量为 `0.95 / 0.075 / 0.95` |
+| `sim_8ac60f042d62` | 2026-03-21 | 240 ticks | 首个长程 world run 完成，`3594` 条 action log，`142` 个 accepted intents，`0` 次 resolver salvage |
 | `sim_world_supervised_smoke_20260321_172346` | 2026-03-21 | 2 ticks | operator 路径 smoke 完成，`run_state / checkpoint / status` 三链路一致 |
 
-这两个 showcase 的意义不同：
+`sim_8ac60f042d62_fork384` 已经不只是证明系统能长跑。它把世界从贝加庞克广播后的金融与秩序恐慌，推进到灰石港一线围绕灰盾护航、闭门续谈、CP-0 渗透取证、罗杰旧部联系窗口并行展开的竞争秩序阶段。
 
+这三类 showcase 的意义不同：
+
+- `sim_8ac60f042d62_fork384` 证明 world mode 能把一条主线持续推进到真正的秩序竞争阶段，而不是停留在情绪升级
 - `sim_8ac60f042d62` 证明世界可以长时间推进，而不是只能做一次性 demo
 - `sim_world_supervised_smoke_20260321_172346` 证明 operator 路径不是“能跑但不可观测”，而是中途可看、终态可对账、诊断可导出
 
