@@ -4,9 +4,11 @@ LLM客户端封装
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
+import httpx
 from openai import OpenAI
 
 from ..config import Config
@@ -91,6 +93,7 @@ class LLMClient:
         profile_id: Optional[str] = None,
         route: Optional[str] = None,
         selector: Optional[str] = None,
+        trust_env_proxy: Optional[bool] = None,
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
@@ -103,14 +106,16 @@ class LLMClient:
         self.profile_id = profile_id
         self.route = route
         self.selector = selector or route or profile_id
+        self.trust_env_proxy = self._resolve_trust_env_proxy(trust_env_proxy)
 
         if not self.api_key:
             identity = self.selector or self.profile_id or self.route or self.model or "default"
             raise ValueError(f"LLM API Key 未配置: {identity}")
-        
+
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            http_client=httpx.Client(trust_env=self.trust_env_proxy),
         )
 
     @classmethod
@@ -149,6 +154,17 @@ class LLMClient:
         if not normalized:
             return None
         return normalized if normalized in allowed else None
+
+    @staticmethod
+    def _resolve_trust_env_proxy(value: Optional[bool]) -> bool:
+        if value is not None:
+            return bool(value)
+        raw = str(
+            os.environ.get("LLM_TRUST_ENV_PROXY")
+            or os.environ.get("OPENAI_TRUST_ENV_PROXY")
+            or ""
+        ).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
 
     def _is_gpt5_family(self) -> bool:
         return str(self.model or "").strip().lower().startswith("gpt-5")

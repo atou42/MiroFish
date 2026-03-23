@@ -22,6 +22,7 @@ from app.models.project import ProjectManager
 from app.services.report_agent import ReportManager
 from app.services.simulation_manager import SimulationManager
 from app.services.world_report_agent import WorldReportAgent
+from app.utils.network_env import drop_proxy_env_inplace
 
 
 def report_dir_for_report_id(report_id: str) -> str:
@@ -123,7 +124,12 @@ def generate(
     label: str,
     report_id: str = "",
     fallback_only: bool = False,
+    keep_proxy_env: bool = False,
 ) -> Dict[str, Any]:
+    cleared_proxy_env: List[str] = []
+    if not keep_proxy_env:
+        cleared_proxy_env = drop_proxy_env_inplace()
+
     sim_manager = SimulationManager()
     state = sim_manager.get_simulation(simulation_id)
     if not state:
@@ -142,6 +148,7 @@ def generate(
         raise ValueError(f"Missing simulation requirement for project: {project.project_id}")
 
     report_id = report_id or f"report_world_{label}_{uuid.uuid4().hex[:10]}"
+    report_dir = reset_report_dir(report_id)
     agent = WorldReportAgent(
         graph_id=graph_id,
         simulation_id=simulation_id,
@@ -151,7 +158,6 @@ def generate(
     report = agent.generate_report(report_id=report_id)
     ReportManager.save_report(report)
 
-    report_dir = report_dir_for_report_id(report.report_id)
     return {
         "simulation_id": simulation_id,
         "label": label,
@@ -161,6 +167,7 @@ def generate(
         "report_json_path": os.path.join(report_dir, "meta.json"),
         "report_markdown_path": os.path.join(report_dir, "full_report.md"),
         "validation_errors": validate_report_artifacts(report.report_id, report_dir),
+        "cleared_proxy_env": cleared_proxy_env,
         "generated_at": datetime.now().isoformat(),
     }
 
@@ -175,6 +182,11 @@ def main() -> None:
         action="store_true",
         help="Skip report LLM calls and generate the report via deterministic fallback sections.",
     )
+    parser.add_argument(
+        "--keep-proxy-env",
+        action="store_true",
+        help="Keep HTTP(S)/SOCKS proxy env vars instead of clearing them before report generation.",
+    )
     args = parser.parse_args()
 
     result = generate(
@@ -182,6 +194,7 @@ def main() -> None:
         label=args.label,
         report_id=args.report_id,
         fallback_only=args.fallback_only,
+        keep_proxy_env=args.keep_proxy_env,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

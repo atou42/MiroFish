@@ -299,6 +299,53 @@ def test_summary_only_bootstrap_uses_accept_count_hint(tmp_path, monkeypatch):
     assert result["diagnostics"]["reason_code"] == "resolver_summary_bootstrapped"
 
 
+def test_resolved_event_preserves_explicit_long_title(tmp_path, monkeypatch):
+    runtime = _build_runtime(tmp_path, monkeypatch)
+    long_title = (
+        "完成最终撤离并切断海军通讯链路，整体转入地下潜伏"
+        "（增补：在二级深海安全屋近域启用非发射式被动信号遮蔽与签名压低，"
+        "并在多个安全屋之间执行错峰热源管理、吸波隔离层轮换、低功率监听板熄火、"
+        "可追溯介质再清洗，以及分层撤离路线的最终脱敏校验）"
+    )
+    assert len(long_title) > 96
+
+    primary_intent = ActorIntent(
+        intent_id="intent_a",
+        tick=1,
+        agent_id=1,
+        agent_name="Actor One",
+        objective="Secure Harbor",
+        summary="Lock down the harbor",
+        desired_duration=2,
+        priority=4,
+        urgency=4,
+        risk_level=3,
+        source="llm",
+    )
+
+    event, drop_reason = runtime._build_event_from_resolved_item(
+        tick=1,
+        item={
+            "owner_intent_id": "intent_a",
+            "title": long_title,
+            "summary": (
+                "该意图与既有撤离收口线和静默校验线高度连续，不新开事件，"
+                "直接并入 queued 事件 event_1。"
+            ),
+            "duration_ticks": 2,
+            "priority": 5,
+        },
+        intent_map={primary_intent.intent_id: primary_intent},
+        source="llm",
+    )
+
+    assert drop_reason == ""
+    assert event is not None
+    assert event.title == long_title[:180]
+    assert event.title != event.summary
+    assert event.summary.startswith("该意图与既有撤离收口线")
+
+
 def test_world_report_fallback_uses_late_run_context(tmp_path, monkeypatch):
     upload_root = tmp_path / "uploads"
     sim_dir = upload_root / "simulations" / "sim_report_fix" / "world"
