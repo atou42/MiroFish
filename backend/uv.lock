@@ -1239,7 +1239,7 @@ wheels = [
 
 [[package]]
 name = "mirofish-backend"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "camel-ai" },

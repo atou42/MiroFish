@@ -37,7 +37,7 @@ def test_world_fork_creates_parallel_simulation(tmp_path: Path, monkeypatch):
             "simulation_id": "sim_source",
             "simulation_mode": "world",
             "time_config": {"total_ticks": 6, "minutes_per_round": 60},
-            "agent_configs": [{"agent_id": 1, "entity_name": "Actor", "entity_type": "faction"}],
+            "agent_configs": [{"agent_id": 1, "entity_name": "Actor", "entity_type": "Character"}],
             "plot_threads": [{"title": "Fork Front"}],
             "pressure_tracks": [
                 {"name": "conflict", "starting_level": 0.4},
@@ -84,9 +84,90 @@ def test_world_fork_creates_parallel_simulation(tmp_path: Path, monkeypatch):
     _write_jsonl(source_world_dir / "actions.jsonl", actions)
 
     snapshots = [
-        {"tick": 1, "round": 1, "phase": "tick_complete", "summary": "tick1", "world_state": {"tension": 0.5}},
-        {"tick": 2, "round": 2, "phase": "tick_complete", "summary": "tick2", "world_state": {"tension": 0.6}},
-        {"tick": 3, "round": 3, "phase": "tick_complete", "summary": "tick3", "world_state": {"tension": 0.7}},
+        {
+            "tick": 1,
+            "round": 1,
+            "phase": "tick_complete",
+            "summary": "tick1",
+            "world_state": {
+                "tension": 0.5,
+                "actor_conditions": {
+                    "1": {
+                        "agent_id": 1,
+                        "entity_name": "Actor",
+                        "entity_type": "Character",
+                        "status": "healthy",
+                        "injury_score": 0,
+                        "alive": True,
+                        "availability": "active",
+                        "last_updated_tick": 0,
+                        "last_event_id": "",
+                        "last_event_title": "",
+                        "latest_note": "",
+                    }
+                },
+            },
+        },
+        {
+            "tick": 2,
+            "round": 2,
+            "phase": "tick_complete",
+            "summary": "tick2",
+            "world_state": {
+                "tension": 0.6,
+                "actor_conditions": {
+                    "1": {
+                        "agent_id": 1,
+                        "entity_name": "Actor",
+                        "entity_type": "Character",
+                        "status": "wounded",
+                        "injury_score": 2,
+                        "alive": True,
+                        "availability": "active",
+                        "last_updated_tick": 2,
+                        "last_event_id": "event_2",
+                        "last_event_title": "Shock Exchange",
+                        "latest_note": "Actor 在 Shock Exchange 中负伤。",
+                    }
+                },
+                "recent_condition_updates": [
+                    {
+                        "tick": 2,
+                        "event_id": "event_2",
+                        "event_title": "Shock Exchange",
+                        "agent_id": 1,
+                        "agent_name": "Actor",
+                        "from_status": "healthy",
+                        "to_status": "wounded",
+                        "summary": "Actor 在 Shock Exchange 中负伤。",
+                    }
+                ],
+            },
+        },
+        {
+            "tick": 3,
+            "round": 3,
+            "phase": "tick_complete",
+            "summary": "tick3",
+            "world_state": {
+                "tension": 0.7,
+                "actor_conditions": {
+                    "1": {
+                        "agent_id": 1,
+                        "entity_name": "Actor",
+                        "entity_type": "Character",
+                        "status": "dead",
+                        "injury_score": 5,
+                        "alive": False,
+                        "availability": "removed",
+                        "last_updated_tick": 3,
+                        "last_event_id": "event_3",
+                        "last_event_title": "Final Strike",
+                        "latest_note": "Actor 在 Final Strike 中死亡。",
+                    }
+                },
+            },
+        },
     ]
     _write_jsonl(source_world_dir / "state_snapshots.jsonl", snapshots)
 
@@ -140,9 +221,11 @@ def test_world_fork_creates_parallel_simulation(tmp_path: Path, monkeypatch):
     assert fork_checkpoint["run_total_rounds"] == 10
     assert fork_checkpoint["target_rounds"] == 10
     assert "shock_001" in fork_checkpoint.get("applied_stimuli_ids", [])
+    assert fork_checkpoint["world_state"]["actor_conditions"]["1"]["status"] == "wounded"
 
     world_state = json.loads((fork_dir / "world" / "world_state.json").read_text(encoding="utf-8"))
     assert world_state.get("tick") == 2
+    assert world_state.get("world_state", {}).get("actor_conditions", {}).get("1", {}).get("status") == "wounded"
 
     assert (fork_dir / "fork_meta.json").exists()
 

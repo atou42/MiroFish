@@ -85,6 +85,39 @@
       ]
     },
     {
+      "id": "recommended_gpt54_actor_fast",
+      "label": "Recommended GPT54 Actor Fast",
+      "description": "GPT-5.4 fast actor with GPT-5.4 deep resolver. Use this when you want to move actor generation off the current Qwen Flash provider path without changing the stable resolver lane.",
+      "strategy_class": "stable",
+      "tags": ["recommended", "stable", "world", "gpt54"],
+      "recommendation": "Use when actor-provider cleanliness matters more than actor cost, while keeping the GPT-5.4 deep resolver lane.",
+      "actor_selector": "eval_litellm_gpt54_fast",
+      "resolver_selector": "eval_litellm_gpt54_deep",
+      "time_overrides": {},
+      "runtime_overrides": {
+        "intent_agents_per_tick": 4,
+        "intent_concurrency": 4,
+        "resolver_cluster_size": 2,
+        "resolver_cluster_concurrency": 2,
+        "max_active_events": 4,
+        "max_queued_events": 6,
+        "max_event_duration_ticks": 2,
+        "resolver_salvage_on_zero_accept": true,
+        "provider_preflight_check": true,
+        "provider_max_retries": 1,
+        "actor_on_failure": "defer",
+        "resolver_on_failure": "pause"
+      },
+      "evaluation": {
+        "campaign_date": "2026-03-24",
+        "stage": "live_trial_pending"
+      },
+      "notes": [
+        "Operational preset for switching actor generation away from qwen3.5-flash while keeping the proven stable resolver path.",
+        "Intended for fork-based live trials against existing long-running worlds."
+      ]
+    },
+    {
       "id": "slow_but_stable",
       "label": "Slow But Stable",
       "description": "Qwen 3.5 Flash actor with GPT-5.4 deep resolver, but with a larger request budget and lower concurrency so slow high-quality resolver calls can still commit ticks.",

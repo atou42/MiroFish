@@ -1,12 +1,20 @@
+import asyncio
 import json
+import time
 from pathlib import Path
 
 from app.config import Config
 from app.services.simulation_runner import RunnerStatus, SimulationRunState, SimulationRunner
 from app.services.world_report_agent import WorldReportAgent
+from app.services import world_report_agent as world_report_agent_module
 from scripts.generate_world_report import validate_report_artifacts
 from scripts import run_world_simulation
-from scripts.run_world_simulation import ActorIntent, WorldSimulationRuntime
+from scripts.run_world_simulation import (
+    ActorIntent,
+    WorldEvent,
+    WorldSimulationRuntime,
+    summarize_actor_conditions,
+)
 from scripts import world_run
 
 
@@ -44,6 +52,46 @@ def _write_runtime_config(tmp_path: Path) -> Path:
             {"name": "legitimacy", "starting_level": 0.5},
         ],
         "initial_world_state": {"starting_condition": "runtime regression"},
+        "runtime_config": {},
+    }
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    return config_path
+
+
+def _write_character_runtime_config(tmp_path: Path, simulation_id: str = "sim_runtime_characters") -> Path:
+    simulation_dir = tmp_path / simulation_id
+    simulation_dir.mkdir()
+    config_path = simulation_dir / "simulation_config.json"
+    config = {
+        "simulation_id": simulation_id,
+        "simulation_mode": "world",
+        "time_config": {
+            "total_ticks": 6,
+            "minutes_per_round": 60,
+        },
+        "agent_configs": [
+            {
+                "agent_id": 1,
+                "entity_name": "Captain One",
+                "entity_type": "Character",
+                "home_location": "Harbor",
+                "story_hooks": ["Leads risky boarding actions"],
+            },
+            {
+                "agent_id": 2,
+                "entity_name": "Captain Two",
+                "entity_type": "Character",
+                "home_location": "Harbor",
+                "story_hooks": ["Controls the inland relay"],
+            },
+        ],
+        "plot_threads": [{"title": "Character Front"}],
+        "pressure_tracks": [
+            {"name": "conflict", "starting_level": 0.72},
+            {"name": "scarcity", "starting_level": 0.3},
+            {"name": "legitimacy", "starting_level": 0.42},
+        ],
+        "initial_world_state": {"starting_condition": "characters under siege"},
         "runtime_config": {},
     }
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -182,6 +230,297 @@ def test_write_checkpoint_uses_atomic_replace(tmp_path, monkeypatch):
     assert payload["stop_reason"] == "target_rounds_reached"
 
 
+def test_dead_actor_persists_across_checkpoint_resume_and_is_not_selected(tmp_path, monkeypatch):
+    config_path = _write_character_runtime_config(tmp_path, simulation_id="sim_dead_actor")
+    world_dir = config_path.parent / "world"
+    world_dir.mkdir(parents=True, exist_ok=True)
+    (world_dir / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "saved_at": "2026-03-25T00:00:00",
+                "status": "completed",
+                "terminal_status": "completed",
+                "stop_reason": "target_rounds_reached",
+                "simulation_id": "sim_dead_actor",
+                "config_path": str(config_path),
+                "last_completed_tick": 4,
+                "run_total_rounds": 4,
+                "target_rounds": 4,
+                "minutes_per_round": 60,
+                "active_events": [],
+                "queued_events": [],
+                "completed_events": [],
+                "world_state": {
+                    "tension": 0.86,
+                    "stability": 0.22,
+                    "momentum": 0.88,
+                    "pressure_tracks": {
+                        "conflict": 0.91,
+                        "scarcity": 0.33,
+                        "legitimacy": 0.18,
+                    },
+                    "focus_threads": ["Character Front"],
+                    "actor_conditions": {
+                        "1": {
+                            "agent_id": 1,
+                            "entity_name": "Captain One",
+                            "entity_type": "Character",
+                            "status": "dead",
+                            "injury_score": 5,
+                            "alive": False,
+                            "availability": "removed",
+                            "last_updated_tick": 4,
+                            "last_event_id": "event_004_0001",
+                            "last_event_title": "Harbor Assassination",
+                            "latest_note": "Captain One 在「Harbor Assassination」中死亡。",
+                        },
+                        "2": {
+                            "agent_id": 2,
+                            "entity_name": "Captain Two",
+                            "entity_type": "Character",
+                            "status": "healthy",
+                            "injury_score": 0,
+                            "alive": True,
+                            "availability": "active",
+                            "last_updated_tick": 0,
+                            "last_event_id": "",
+                            "last_event_title": "",
+                            "latest_note": "",
+                        },
+                    },
+                    "actor_condition_summary": {
+                        "healthy": 1,
+                        "shaken": 0,
+                        "wounded": 0,
+                        "critical": 0,
+                        "incapacitated": 0,
+                        "dead": 1,
+                        "active": 1,
+                    },
+                    "recent_condition_updates": [
+                        {
+                            "tick": 4,
+                            "event_id": "event_004_0001",
+                            "event_title": "Harbor Assassination",
+                            "agent_id": 1,
+                            "agent_name": "Captain One",
+                            "from_status": "critical",
+                            "to_status": "dead",
+                            "summary": "Captain One 在「Harbor Assassination」中死亡。",
+                        }
+                    ],
+                    "last_tick_summary": "Tick 4 ended with Captain One dead.",
+                },
+                "last_snapshot": {
+                    "tick": 4,
+                    "summary": "Tick 4 ended with Captain One dead.",
+                    "world_state": {
+                        "actor_conditions": {
+                            "1": {"status": "dead", "injury_score": 5},
+                            "2": {"status": "healthy", "injury_score": 0},
+                        }
+                    },
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(WorldSimulationRuntime, "_build_llm", lambda self, selector=None: None)
+    monkeypatch.setattr(WorldSimulationRuntime, "_get_actor_llm", lambda self, agent=None: None)
+
+    runtime = WorldSimulationRuntime(
+        config_path=str(config_path),
+        max_rounds=8,
+        resume_from_checkpoint=True,
+    )
+
+    assert runtime.world_state["actor_conditions"]["1"]["status"] == "dead"
+
+    selected = runtime._actors_for_tick(5)
+    selected_ids = [agent["agent_id"] for agent in selected]
+
+    assert 1 not in selected_ids
+    assert 2 in selected_ids
+    assert runtime.actor_selection_counts.get(1, 0) == 0
+    assert runtime.actor_selection_counts.get(2, 0) == 1
+
+
+def test_completed_violent_event_updates_actor_conditions_snapshot_and_checkpoint(tmp_path, monkeypatch):
+    config_path = _write_character_runtime_config(tmp_path, simulation_id="sim_condition_updates")
+
+    monkeypatch.setattr(WorldSimulationRuntime, "_build_llm", lambda self, selector=None: None)
+    monkeypatch.setattr(WorldSimulationRuntime, "_get_actor_llm", lambda self, agent=None: None)
+
+    runtime = WorldSimulationRuntime(config_path=str(config_path), max_rounds=1)
+    runtime.active_events["event_001_0001"] = WorldEvent(
+        event_id="event_001_0001",
+        tick=1,
+        title="Harbor Assassination",
+        summary="Captain One launches a close-range assassination attempt under artillery cover.",
+        primary_agent_id=1,
+        primary_agent_name="Captain One",
+        participants=["Captain One", "Captain Two"],
+        participant_ids=[1, 2],
+        source_intent_ids=["intent_001_0001"],
+        priority=5,
+        risk_level=5,
+        duration_ticks=1,
+        resolves_at_tick=1,
+        status="active",
+        location="Harbor",
+        tags=["battle", "assassination"],
+        state_impacts={"conflict": 0.25, "stability": -0.15},
+    )
+
+    rolls = iter([0.0, 9.0])
+    monkeypatch.setattr(runtime.rng, "random", lambda: next(rolls))
+    monkeypatch.setattr(
+        runtime,
+        "_event_condition_profile",
+        lambda event: {"hazard": 0.95, "violent": True, "fatal": True},
+    )
+
+    completed = runtime._complete_due_events(1)
+
+    assert len(completed) == 1
+    assert completed[0].condition_updates
+    assert runtime.world_state["actor_conditions"]["1"]["status"] == "dead"
+    assert runtime.world_state["actor_conditions"]["2"]["status"] == "healthy"
+
+    snapshot = runtime._capture_snapshot(
+        tick=1,
+        scene_title="Character Front",
+        intents=[],
+        resolution={
+            "accepted_count": 1,
+            "deferred_count": 0,
+            "rejected_count": 0,
+        },
+        completed_this_tick=completed,
+    )
+
+    assert snapshot["world_state"]["actor_conditions"]["1"]["status"] == "dead"
+    assert snapshot["world_state"]["actor_condition_summary"]["dead"] == 1
+    assert snapshot["metrics"]["condition_updates_count"] == 1
+
+    runtime._write_checkpoint(status="running")
+    checkpoint = json.loads(Path(runtime.checkpoint_path).read_text(encoding="utf-8"))
+
+    assert checkpoint["world_state"]["actor_conditions"]["1"]["status"] == "dead"
+    assert checkpoint["world_state"]["recent_condition_updates"][-1]["to_status"] == "dead"
+
+
+def test_incapacitated_actor_recovers_after_long_gap(tmp_path, monkeypatch):
+    config_path = _write_character_runtime_config(tmp_path, simulation_id="sim_incapacitated_recovery")
+
+    monkeypatch.setattr(WorldSimulationRuntime, "_build_llm", lambda self, selector=None: None)
+    monkeypatch.setattr(WorldSimulationRuntime, "_get_actor_llm", lambda self, agent=None: None)
+
+    runtime = WorldSimulationRuntime(config_path=str(config_path), max_rounds=1)
+    runtime.world_state["actor_conditions"]["1"].update(
+        {
+            "status": "incapacitated",
+            "injury_score": 4,
+            "alive": True,
+            "availability": "sidelined",
+            "last_updated_tick": 3,
+            "last_event_id": "event_003_0001",
+            "last_event_title": "Harbor Collapse",
+            "latest_note": "Captain One 在「Harbor Collapse」中失去行动能力。",
+        }
+    )
+    runtime.world_state["actor_condition_summary"] = summarize_actor_conditions(runtime.world_state["actor_conditions"])
+    runtime.actor_last_event_tick[1] = 3
+
+    recovered = runtime._recover_actor_conditions(24)
+
+    assert recovered
+    assert recovered[0]["agent_name"] == "Captain One"
+    assert recovered[0]["from_status"] == "incapacitated"
+    assert recovered[0]["to_status"] == "critical"
+    assert runtime.world_state["actor_conditions"]["1"]["status"] == "critical"
+    assert runtime.world_state["actor_conditions"]["1"]["availability"] == "limited"
+
+
+def test_runtime_promotes_repeated_participant_into_dynamic_cast_and_checkpoint(tmp_path, monkeypatch):
+    config_path = _write_character_runtime_config(tmp_path, simulation_id="sim_dynamic_cast")
+
+    monkeypatch.setattr(WorldSimulationRuntime, "_build_llm", lambda self, selector=None: None)
+    monkeypatch.setattr(WorldSimulationRuntime, "_get_actor_llm", lambda self, agent=None: None)
+
+    runtime = WorldSimulationRuntime(config_path=str(config_path), max_rounds=1)
+    runtime.world_state["actor_conditions"]["1"].update(
+        {
+            "status": "dead",
+            "injury_score": 5,
+            "alive": False,
+            "availability": "removed",
+            "last_updated_tick": 4,
+            "last_event_id": "event_004_0001",
+            "last_event_title": "Harbor Assassination",
+            "latest_note": "Captain One 在「Harbor Assassination」中死亡。",
+        }
+    )
+    runtime.world_state["actor_condition_summary"] = summarize_actor_conditions(runtime.world_state["actor_conditions"])
+    runtime.completed_events.extend(
+        [
+            WorldEvent(
+                event_id="event_003_0001",
+                tick=3,
+                title="Archive Lockdown",
+                summary="Captain Two relies on Harbor Clerk to preserve the surviving manifests.",
+                primary_agent_id=2,
+                primary_agent_name="Captain Two",
+                participants=["Captain Two", "Harbor Clerk"],
+                participant_ids=[2],
+                source_intent_ids=["intent_003_0001"],
+                priority=4,
+                risk_level=3,
+                duration_ticks=1,
+                resolves_at_tick=3,
+                status="completed",
+                location="Harbor Archive",
+            ),
+            WorldEvent(
+                event_id="event_004_0002",
+                tick=4,
+                title="Dockside Audit",
+                summary="Harbor Clerk carries sealed copies through the dockside audit line.",
+                primary_agent_id=2,
+                primary_agent_name="Captain Two",
+                participants=["Captain Two", "Harbor Clerk"],
+                participant_ids=[2],
+                source_intent_ids=["intent_004_0002"],
+                priority=4,
+                risk_level=2,
+                duration_ticks=1,
+                resolves_at_tick=4,
+                status="completed",
+                location="Dockside Archive",
+            ),
+        ]
+    )
+
+    promoted = runtime._maybe_promote_dynamic_agents(5, "Harbor Front")
+
+    assert promoted
+    new_agent = promoted[0]
+    assert new_agent["entity_name"] == "Harbor Clerk"
+    assert any(agent.get("entity_name") == "Harbor Clerk" for agent in runtime.agent_configs)
+    assert runtime.world_state["actor_conditions"][str(new_agent["agent_id"])]["status"] == "healthy"
+    assert runtime.world_state["runtime_cast"]["dynamic_agents"][0]["entity_name"] == "Harbor Clerk"
+
+    runtime._write_checkpoint(status="running")
+    checkpoint = json.loads(Path(runtime.checkpoint_path).read_text(encoding="utf-8"))
+
+    assert checkpoint["world_state"]["runtime_cast"]["dynamic_agents"][0]["entity_name"] == "Harbor Clerk"
+    assert checkpoint["world_state"]["actor_conditions"][str(new_agent["agent_id"])]["status"] == "healthy"
+
+
 def test_invalid_json_intent_prefers_structured_recovery(tmp_path, monkeypatch):
     runtime = _build_runtime(tmp_path, monkeypatch)
 
@@ -246,6 +585,154 @@ def test_invalid_json_intent_partial_recovery_preserves_structured_fields(tmp_pa
     assert "lawfare" in intent.tags
     assert intent.state_impacts["conflict"] == 0.15
     assert intent.state_impacts["stability"] == -0.1
+
+
+def test_generate_single_intent_accepts_nested_chosen_action_payload(tmp_path, monkeypatch):
+    runtime = _build_runtime(tmp_path, monkeypatch)
+    runtime.active_events["event_801_2559"] = WorldEvent(
+        event_id="event_801_2559",
+        tick=801,
+        title="Open Controlled Verification Window",
+        summary="A narrow verification window stays open.",
+        primary_agent_id=28,
+        primary_agent_name="海军",
+        participants=["海军"],
+        participant_ids=[28],
+        source_intent_ids=["intent_window"],
+        resolves_at_tick=804,
+        status="active",
+        location="Alpha",
+    )
+    runtime.active_events["event_801_2558"] = WorldEvent(
+        event_id="event_801_2558",
+        tick=801,
+        title="Maintain Secret Contact Corridor",
+        summary="A low-exposure relay remains active.",
+        primary_agent_id=10,
+        primary_agent_name="海军秘密部队",
+        participants=["海军秘密部队"],
+        participant_ids=[10],
+        source_intent_ids=["intent_corridor"],
+        resolves_at_tick=804,
+        status="active",
+        location="Alpha",
+    )
+    runtime.active_events["event_803_2566"] = WorldEvent(
+        event_id="event_803_2566",
+        tick=803,
+        title="Protect Return Route",
+        summary="Escort groups secure the return lane.",
+        primary_agent_id=13,
+        primary_agent_name="SSG",
+        participants=["SSG"],
+        participant_ids=[13],
+        source_intent_ids=["intent_route"],
+        resolves_at_tick=804,
+        status="active",
+        location="Alpha",
+    )
+
+    traces = []
+    monkeypatch.setattr(runtime, "_write_llm_trace", lambda **kwargs: traces.append(kwargs))
+
+    heuristic_calls = []
+
+    def fake_heuristic_intent(tick, scene_title, agent):
+        heuristic_calls.append((tick, scene_title, agent["entity_name"]))
+        return ActorIntent(
+            intent_id="intent_fallback",
+            tick=tick,
+            agent_id=agent["agent_id"],
+            agent_name=agent["entity_name"],
+            objective="expand influence",
+            summary="fallback",
+            location=scene_title,
+            priority=3,
+            urgency=3,
+            risk_level=3,
+            source="heuristic",
+        )
+
+    monkeypatch.setattr(runtime, "_heuristic_intent", fake_heuristic_intent)
+
+    class FakeLLM:
+        provider_id = "litellm"
+        profile_id = "eval_litellm_gpt54_fast"
+        model = "gpt-5.4"
+        speed_mode = "fast"
+        reasoning_effort = None
+        verbosity = None
+        service_tier = None
+
+        def chat_json_with_meta(self, messages, temperature, max_tokens, timeout):
+            return {
+                "data": {
+                    "actor": "SSG",
+                    "tick": 804,
+                    "scene_title": "航线咽喉与地方王国的连锁反应",
+                    "chosen_action": {
+                        "title": "SSG 向 Alpha 白名单返航航段秘密部署海难副频甄别浮标网",
+                        "objective": "在返航外缘部署甄别浮标网并派出轻型验证艇伴随回收。",
+                        "summary": "用窄带告警和样本回收压缩伪海难副频劫夺窗口，保护白名单核验链可信度。",
+                        "target_location": "中立扇区 Alpha 白名单核验护航走廊外缘至返航航段",
+                        "participants": [
+                            "SSG",
+                            "海军科学部队技术军官",
+                            "海军第一舰队局部护航单元",
+                        ],
+                        "expected_effects": {
+                            "on_conflict": 0.02,
+                            "on_legitimacy": 0.03,
+                            "on_stability": 0.02,
+                        },
+                    },
+                    "participants": [
+                        "SSG",
+                        "海军科学部队技术军官",
+                        "海军第一舰队局部护航单元",
+                        "SWORD 外缘联络组",
+                    ],
+                    "targets": [
+                        "伪海难副频源",
+                        "返航段观察员护航链",
+                    ],
+                    "dependencies_used": [
+                        "event_801_2559",
+                        "event_801_2558",
+                        "event_803_2566",
+                        "event_missing",
+                    ],
+                },
+                "json_candidate": '{"chosen_action":{"objective":"在返航外缘部署甄别浮标网并派出轻型验证艇伴随回收。"}}',
+                "raw_response": "ok",
+            }
+
+    monkeypatch.setattr(runtime, "_get_actor_llm", lambda agent=None: FakeLLM())
+
+    intent = asyncio.run(
+        runtime._generate_single_intent(
+            tick=804,
+            scene_title="航线咽喉与地方王国的连锁反应",
+            agent={
+                "agent_id": 13,
+                "entity_name": "SSG",
+                "entity_type": "faction",
+                "home_location": "蛋头岛近海",
+            },
+        )
+    )
+
+    assert heuristic_calls == []
+    assert intent is not None
+    assert intent.source == "llm"
+    assert "甄别浮标网" in intent.objective
+    assert "压缩伪海难副频劫夺窗口" in intent.summary
+    assert intent.location == "中立扇区 Alpha 白名单核验护航走廊外缘至返航航段"
+    assert intent.target == "伪海难副频源 / 返航段观察员护航链"
+    assert intent.dependencies == ["event_801_2559", "event_801_2558", "event_803_2566"]
+    assert "SWORD 外缘联络组" in intent.participants
+    assert intent.state_impacts["legitimacy"] == 0.03
+    assert traces and traces[0]["status"] == "accepted"
 
 
 def test_summary_only_bootstrap_uses_accept_count_hint(tmp_path, monkeypatch):
@@ -443,6 +930,83 @@ def test_world_report_fallback_uses_late_run_context(tmp_path, monkeypatch):
     assert "Tick 8" in trajectory
     assert "未收束风险" in risks
     assert trajectory != risks
+
+
+def test_world_report_outline_uses_hard_timeout_and_falls_back(monkeypatch):
+    class SlowLLM:
+        def chat_json(self, *args, **kwargs):
+            time.sleep(0.2)
+            return {
+                "title": "不该成功",
+                "summary": "不该成功",
+                "sections": [{"title": "不该成功"}],
+            }
+
+    monkeypatch.setattr(world_report_agent_module, "WORLD_REPORT_LLM_TIMEOUT_SECONDS", 0.05)
+
+    agent = WorldReportAgent(
+        graph_id="graph_timeout",
+        simulation_id="sim_timeout",
+        simulation_requirement="推进这个世界",
+        llm_client=SlowLLM(),
+        enable_llm=True,
+    )
+
+    started = time.perf_counter()
+    outline = agent._build_outline({"world_state": {}, "action_types": {}, "top_actors": {}})
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.3
+    assert outline.title == "世界观自动推进报告"
+    assert [section.title for section in outline.sections] == [
+        "世界起点与驱动矛盾",
+        "推进轨迹与事件链",
+        "关键角色与势力变化",
+        "后续风险与可操作建议",
+    ]
+
+
+def test_world_report_section_uses_hard_timeout_and_falls_back(monkeypatch):
+    class SlowLLM:
+        def chat(self, *args, **kwargs):
+            time.sleep(0.2)
+            return "不该成功"
+
+    monkeypatch.delenv("WORLD_REPORT_LLM_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(world_report_agent_module, "WORLD_REPORT_LLM_TIMEOUT_SECONDS", 0.05)
+
+    agent = WorldReportAgent(
+        graph_id="graph_timeout",
+        simulation_id="sim_timeout",
+        simulation_requirement="推进这个世界",
+        llm_client=SlowLLM(),
+        enable_llm=True,
+    )
+
+    context = {
+        "config": {},
+        "world_state": {
+            "starting_condition": "广播后 24 小时",
+            "focus_threads": ["海军高压执行与内部裂缝"],
+        },
+        "tick_summaries": [
+            {"tick": 1, "summary": "Tick 1 开局对峙。"},
+            {"tick": 2, "summary": "Tick 2 升级冲突。"},
+        ],
+        "snapshots": [],
+        "final_event": {},
+        "recent_completed_events": [],
+        "recent_started_events": [],
+        "top_actors": {},
+    }
+
+    started = time.perf_counter()
+    content = agent._build_section_content("推进轨迹与事件链", context)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.3
+    assert "推进轨迹与事件链" in content
+    assert "Tick 1 开局对峙。" in content
 
 
 def test_validate_report_artifacts_flags_duplicate_sections(tmp_path):

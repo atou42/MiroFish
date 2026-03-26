@@ -133,6 +133,7 @@ def build_initial_world_state(
     plot_threads: Sequence[Dict[str, Any]],
     pressure_tracks: Sequence[Dict[str, Any]],
     initial_world_state: Dict[str, Any],
+    agent_configs: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     pressure_map: Dict[str, float] = {}
     for track in pressure_tracks:
@@ -149,6 +150,7 @@ def build_initial_world_state(
     tension = clamp((conflict * 0.60) + (scarcity * 0.25) + (momentum * 0.15), 0.05, 0.95)
     stability = clamp((legitimacy * 0.50) + ((1 - conflict) * 0.35) + ((1 - scarcity) * 0.15), 0.05, 0.95)
 
+    actor_conditions = build_actor_condition_map(agent_configs or [])
     return {
         "tension": round(tension, 3),
         "stability": round(stability, 3),
@@ -157,6 +159,9 @@ def build_initial_world_state(
         "focus_threads": [thread.get("title", "") for thread in plot_threads[:6] if thread.get("title")],
         "starting_condition": initial_world_state.get("starting_condition", ""),
         "last_tick_summary": "",
+        "actor_conditions": actor_conditions,
+        "actor_condition_summary": summarize_actor_conditions(actor_conditions),
+        "recent_condition_updates": [],
         "active_event_ids": [],
         "queued_event_ids": [],
         "completed_event_ids": [],
@@ -259,6 +264,301 @@ def normalize_optional_text(value: Any) -> str:
     if normalized.lower() in PLACEHOLDER_TEXTS:
         return ""
     return normalized
+
+
+ACTOR_CONDITION_STATUS_BY_SCORE = {
+    0: "healthy",
+    1: "shaken",
+    2: "wounded",
+    3: "critical",
+    4: "incapacitated",
+    5: "dead",
+}
+ACTOR_CONDITION_SCORE_BY_STATUS = {
+    status: score for score, status in ACTOR_CONDITION_STATUS_BY_SCORE.items()
+}
+ACTOR_CONDITION_SELECTION_MULTIPLIER = {
+    "healthy": 1.0,
+    "shaken": 0.9,
+    "wounded": 0.62,
+    "critical": 0.32,
+    "incapacitated": 0.0,
+    "dead": 0.0,
+}
+RUNTIME_CAST_SCHEMA_VERSION = 1
+PROMOTABLE_ROLE_HINTS = {
+    "书记",
+    "书记官",
+    "书记员",
+    "执笔",
+    "裁笔",
+    "联络员",
+    "接应",
+    "军医",
+    "医官",
+    "看守",
+    "领航",
+    "引水",
+    "买手",
+    "代理人",
+    "代理官",
+    "副官",
+    "司库",
+    "见证人",
+    "誊录员",
+    "值守员",
+    "特派员",
+    "调度员",
+    "护送官",
+    "Officer",
+    "Clerk",
+    "Medic",
+    "Courier",
+    "Witness",
+    "Keeper",
+    "Pilot",
+    "Escort",
+    "Agent",
+    "Aide",
+}
+PROMOTABLE_ROLE_SUFFIXES = ("员", "官", "医", "手", "长", "士", "兵", "将")
+PROMOTION_FALLBACK_SEAT_LABELS = [
+    "前线代理人",
+    "外联书记",
+    "港务联络官",
+    "封存见证人",
+    "临时执笔官",
+]
+MORTAL_ENTITY_TYPES = {
+    "character",
+    "person",
+    "human",
+    "npc",
+    "individual",
+    "hero",
+    "villain",
+}
+DIRECT_VIOLENCE_TOKENS = {
+    "battle",
+    "war",
+    "attack",
+    "assault",
+    "raid",
+    "siege",
+    "ambush",
+    "duel",
+    "bombard",
+    "strike",
+    "hunt",
+    "炮击",
+    "围剿",
+    "突袭",
+    "开战",
+    "决斗",
+    "袭击",
+    "交火",
+    "血战",
+    "追杀",
+    "清剿",
+    "歼灭",
+}
+LETHAL_VIOLENCE_TOKENS = {
+    "execute",
+    "execution",
+    "assassinate",
+    "assassination",
+    "kill",
+    "death",
+    "massacre",
+    "斩首",
+    "处决",
+    "刺杀",
+    "处死",
+    "歼灭",
+    "灭口",
+    "屠杀",
+}
+LOW_STAKES_TOKENS = {
+    "negotiate",
+    "broadcast",
+    "survey",
+    "investigate",
+    "trade",
+    "escort",
+    "alliance",
+    "negotiation",
+    "调查",
+    "广播",
+    "声明",
+    "谈判",
+    "会谈",
+    "交易",
+    "护送",
+    "巡查",
+}
+
+
+def actor_supports_casualty(entity_type: Any) -> bool:
+    return str(entity_type or "").strip().lower() in MORTAL_ENTITY_TYPES
+
+
+def normalize_agent_payload(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    agent_id = safe_int(payload.get("agent_id", 0), default=0, lower=1)
+    entity_name = normalize_optional_text(payload.get("entity_name") or payload.get("username"))
+    if agent_id <= 0 or not entity_name:
+        return None
+    return {
+        "agent_id": agent_id,
+        "entity_name": entity_name,
+        "entity_type": "Character",
+        "public_role": clip_text(payload.get("public_role", ""), 180),
+        "driving_goals": clip_list(payload.get("driving_goals", []), 120, 4),
+        "resources": clip_list(payload.get("resources", []), 120, 5),
+        "constraints": clip_list(payload.get("constraints", []), 120, 4),
+        "temperament": clip_list(payload.get("temperament", []), 40, 4),
+        "connected_entities": clip_list(payload.get("connected_entities", []), 80, 6),
+        "story_hooks": clip_list(payload.get("story_hooks", []), 140, 4),
+        "home_location": clip_text(payload.get("home_location", ""), 120),
+        "summary": clip_text(payload.get("summary", ""), 240),
+        "llm_selector": clip_text(payload.get("llm_selector", ""), 80),
+        "runtime_origin": normalize_optional_text(payload.get("runtime_origin")),
+        "runtime_affiliation": normalize_optional_text(payload.get("runtime_affiliation")),
+        "runtime_seat_label": normalize_optional_text(payload.get("runtime_seat_label")),
+        "runtime_created_tick": safe_int(payload.get("runtime_created_tick", 0), default=0, lower=0),
+    }
+
+
+def dynamic_agents_from_world_state(world_state: Any) -> List[Dict[str, Any]]:
+    if not isinstance(world_state, dict):
+        return []
+    runtime_cast = world_state.get("runtime_cast")
+    if not isinstance(runtime_cast, dict):
+        return []
+    dynamic_agents = runtime_cast.get("dynamic_agents")
+    if not isinstance(dynamic_agents, list):
+        return []
+    return [
+        normalized
+        for normalized in (
+            normalize_agent_payload(item)
+            for item in dynamic_agents
+        )
+        if normalized
+    ]
+
+
+def actor_condition_status(score: int) -> str:
+    return ACTOR_CONDITION_STATUS_BY_SCORE.get(int(score), "healthy")
+
+
+def actor_condition_availability(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "dead":
+        return "removed"
+    if normalized == "incapacitated":
+        return "sidelined"
+    if normalized == "critical":
+        return "limited"
+    return "active"
+
+
+def initial_actor_condition(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    agent_id = safe_int(agent.get("agent_id", 0), default=0, lower=0)
+    if agent_id <= 0 or not actor_supports_casualty(agent.get("entity_type")):
+        return None
+    entity_name = str(agent.get("entity_name") or agent.get("username") or f"Actor {agent_id}").strip()
+    entity_type = str(agent.get("entity_type") or "").strip()
+    return {
+        "agent_id": agent_id,
+        "entity_name": entity_name,
+        "entity_type": entity_type,
+        "status": "healthy",
+        "injury_score": 0,
+        "alive": True,
+        "availability": "active",
+        "last_updated_tick": 0,
+        "last_event_id": "",
+        "last_event_title": "",
+        "latest_note": "",
+    }
+
+
+def normalize_actor_condition_entry(agent: Dict[str, Any], payload: Any) -> Dict[str, Any]:
+    default_entry = initial_actor_condition(agent)
+    if default_entry is None:
+        raise ValueError("non-mortal actor cannot have a casualty condition entry")
+    if payload is None:
+        return default_entry
+    if not isinstance(payload, dict):
+        raise ValueError(f"actor condition entry must be an object for agent {default_entry['agent_id']}")
+
+    payload_status = str(payload.get("status") or "").strip().lower()
+    payload_score = safe_int(
+        payload.get("injury_score", ACTOR_CONDITION_SCORE_BY_STATUS.get(payload_status, 0)),
+        default=ACTOR_CONDITION_SCORE_BY_STATUS.get(payload_status, 0),
+        lower=0,
+        upper=5,
+    )
+    status = payload_status if payload_status in ACTOR_CONDITION_SCORE_BY_STATUS else actor_condition_status(payload_score)
+    score = max(payload_score, ACTOR_CONDITION_SCORE_BY_STATUS[status])
+    status = actor_condition_status(score)
+    availability = actor_condition_availability(status)
+
+    entry = dict(default_entry)
+    entry.update(
+        {
+            "status": status,
+            "injury_score": score,
+            "alive": status != "dead",
+            "availability": availability,
+            "last_updated_tick": safe_int(payload.get("last_updated_tick", 0), default=0, lower=0),
+            "last_event_id": normalize_optional_text(payload.get("last_event_id")),
+            "last_event_title": normalize_optional_text(payload.get("last_event_title")),
+            "latest_note": normalize_optional_text(payload.get("latest_note")),
+        }
+    )
+    return entry
+
+
+def build_actor_condition_map(
+    agent_configs: Sequence[Dict[str, Any]],
+    payload: Any = None,
+) -> Dict[str, Dict[str, Any]]:
+    if payload is None:
+        payload_map: Dict[str, Any] = {}
+    elif isinstance(payload, dict):
+        payload_map = payload
+    else:
+        raise ValueError("actor_conditions must be an object")
+
+    actor_conditions: Dict[str, Dict[str, Any]] = {}
+    for agent in agent_configs:
+        default_entry = initial_actor_condition(agent)
+        if default_entry is None:
+            continue
+        key = str(default_entry["agent_id"])
+        actor_conditions[key] = normalize_actor_condition_entry(agent, payload_map.get(key))
+    return actor_conditions
+
+
+def summarize_actor_conditions(actor_conditions: Any) -> Dict[str, int]:
+    summary = {status: 0 for status in ACTOR_CONDITION_SCORE_BY_STATUS}
+    if not isinstance(actor_conditions, dict):
+        return summary
+    for entry in actor_conditions.values():
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status") or "").strip().lower()
+        if status in summary:
+            summary[status] += 1
+    summary["active"] = sum(
+        1
+        for entry in actor_conditions.values()
+        if isinstance(entry, dict) and str(entry.get("availability") or "").strip().lower() == "active"
+    )
+    return summary
 
 
 def extract_signal_tokens(value: Any) -> List[str]:
@@ -398,12 +698,15 @@ class WorldEvent:
     participant_ids: List[int]
     source_intent_ids: List[str]
     priority: int = 3
+    risk_level: int = 3
     duration_ticks: int = 1
     resolves_at_tick: int = 1
     status: str = "queued"
     location: str = ""
     dependencies: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
     state_impacts: Dict[str, float] = field(default_factory=dict)
+    condition_updates: List[Dict[str, Any]] = field(default_factory=list)
     source: str = "heuristic"
     rationale: str = ""
 
@@ -419,12 +722,15 @@ class WorldEvent:
             "participant_ids": self.participant_ids,
             "source_intent_ids": self.source_intent_ids,
             "priority": self.priority,
+            "risk_level": self.risk_level,
             "duration_ticks": self.duration_ticks,
             "resolves_at_tick": self.resolves_at_tick,
             "status": self.status,
             "location": self.location,
             "dependencies": self.dependencies,
+            "tags": self.tags,
             "state_impacts": self.state_impacts,
+            "condition_updates": self.condition_updates,
             "source": self.source,
             "rationale": self.rationale,
         }
@@ -446,15 +752,22 @@ class WorldEvent:
             ],
             source_intent_ids=ensure_list(payload.get("source_intent_ids")),
             priority=safe_int(payload.get("priority", 3), default=3, lower=1, upper=5),
+            risk_level=safe_int(payload.get("risk_level", 3), default=3, lower=1, upper=5),
             duration_ticks=safe_int(payload.get("duration_ticks", 1), default=1, lower=1, upper=12),
             resolves_at_tick=safe_int(payload.get("resolves_at_tick", 1), default=1, lower=1),
             status=str(payload.get("status") or "queued").strip() or "queued",
             location=normalize_optional_text(payload.get("location")),
             dependencies=ensure_list(payload.get("dependencies")),
+            tags=ensure_list(payload.get("tags"))[:8],
             state_impacts={
                 str(key): safe_float(value)
                 for key, value in (payload.get("state_impacts") or {}).items()
             },
+            condition_updates=[
+                item
+                for item in (payload.get("condition_updates") or [])
+                if isinstance(item, dict)
+            ][:12],
             source=normalize_optional_text(payload.get("source")) or "heuristic",
             rationale=normalize_optional_text(payload.get("rationale")),
         )
@@ -473,12 +786,14 @@ class WorldEvent:
             "summary": self.summary,
             "participants": self.participants,
             "priority": self.priority,
+            "risk_level": self.risk_level,
             "duration_ticks": self.duration_ticks,
             "remaining_ticks": max(self.resolves_at_tick - self.tick + 1, 0),
             "resolves_at_tick": self.resolves_at_tick,
             "location": self.location,
             "dependencies": self.dependencies,
             "status": "active",
+            "tags": self.tags,
             "state_impacts": self.state_impacts,
             "action_type": "EVENT_STARTED",
             "action_args": {
@@ -504,13 +819,16 @@ class WorldEvent:
             "summary": self.summary,
             "participants": self.participants,
             "priority": self.priority,
+            "risk_level": self.risk_level,
             "duration_ticks": self.duration_ticks,
             "remaining_ticks": 0,
             "resolves_at_tick": self.resolves_at_tick,
             "location": self.location,
             "dependencies": self.dependencies,
             "status": "completed",
+            "tags": self.tags,
             "state_impacts": self.state_impacts,
+            "condition_updates": self.condition_updates,
             "action_type": "EVENT_COMPLETED",
             "action_args": {
                 **self.to_state_dict(),
@@ -536,12 +854,14 @@ class WorldEvent:
             "summary": self.summary,
             "participants": self.participants,
             "priority": self.priority,
+            "risk_level": self.risk_level,
             "duration_ticks": self.duration_ticks,
             "remaining_ticks": self.duration_ticks,
             "resolves_at_tick": self.resolves_at_tick,
             "location": self.location,
             "dependencies": self.dependencies,
             "status": "queued",
+            "tags": self.tags,
             "state_impacts": self.state_impacts,
             "queued_events_count": queued_count,
             "action_type": "EVENT_QUEUED",
@@ -597,7 +917,16 @@ class WorldSimulationRuntime:
             self.target_rounds = min(configured_rounds, max_rounds) if max_rounds else configured_rounds
         self.total_rounds = self.target_rounds
         self.minutes_per_round = safe_int(time_config.get("minutes_per_round", 60), default=60, lower=1)
-        self.agent_configs = self.config.get("agent_configs", [])
+        self.base_agent_configs = [
+            dict(agent)
+            for agent in (self.config.get("agent_configs") or [])
+            if isinstance(agent, dict)
+        ]
+        self.dynamic_agent_configs: List[Dict[str, Any]] = []
+        self.agent_configs: List[Dict[str, Any]] = []
+        self.agent_index: Dict[int, Dict[str, Any]] = {}
+        self.agent_name_index: Dict[str, Dict[str, Any]] = {}
+        self.faction_agent_names: set[str] = set()
         self.plot_threads = self.config.get("plot_threads", [])
         self.pressure_tracks = self.config.get("pressure_tracks", [])
         self.world_rules = self.config.get("world_rules", [])
@@ -651,6 +980,43 @@ class WorldSimulationRuntime:
             0.0,
             0.8,
         )
+        mortal_agent_count = sum(
+            1 for agent in self.base_agent_configs if actor_supports_casualty(agent.get("entity_type"))
+        )
+        self.dynamic_cast_enabled = self._runtime_bool("dynamic_cast_enabled", True)
+        self.dynamic_cast_frontstage_floor = safe_int(
+            self.runtime_config.get(
+                "dynamic_cast_frontstage_floor",
+                max(2, min(5, (mortal_agent_count // 4) + 2)),
+            ),
+            default=max(2, min(5, (mortal_agent_count // 4) + 2)),
+            lower=1,
+        )
+        self.dynamic_cast_recent_event_window = safe_int(
+            self.runtime_config.get("dynamic_cast_recent_event_window", 24),
+            default=24,
+            lower=4,
+            upper=96,
+        )
+        self.dynamic_cast_min_candidate_mentions = safe_int(
+            self.runtime_config.get("dynamic_cast_min_candidate_mentions", 2),
+            default=2,
+            lower=1,
+            upper=6,
+        )
+        self.dynamic_cast_max_agents = safe_int(
+            self.runtime_config.get("dynamic_cast_max_agents", max(2, min(12, max(mortal_agent_count // 2, 2)))),
+            default=max(2, min(12, max(mortal_agent_count // 2, 2))),
+            lower=1,
+            upper=24,
+        )
+        self.incapacitated_recovery_ticks = safe_int(
+            self.runtime_config.get("incapacitated_recovery_ticks", 18),
+            default=18,
+            lower=8,
+            upper=96,
+        )
+        self._rebuild_agent_directory()
 
         actor_count = max(len(self.agent_configs), 1)
         self.max_active_events = safe_int(
@@ -768,10 +1134,8 @@ class WorldSimulationRuntime:
         self.actor_selection_counts: Dict[int, int] = {}
         self.actor_event_counts: Dict[int, int] = {}
         self._counted_event_ids: set[str] = set()
-        self.actor_static_scores = {
-            safe_int(agent.get("agent_id", 0), default=0, lower=0): self._actor_static_score(agent)
-            for agent in self.agent_configs
-        }
+        self.actor_static_scores: Dict[int, int] = {}
+        self._rebuild_agent_directory()
 
         self._event_counter = 0
         self._intent_counter = 0
@@ -784,6 +1148,8 @@ class WorldSimulationRuntime:
 
         if self.resume_from_checkpoint:
             self._load_checkpoint()
+        self._sync_actor_conditions_world_state()
+        self._sync_runtime_cast_world_state()
 
     def _runtime_bool(self, key: str, default: bool) -> bool:
         value = self.runtime_config.get(key)
@@ -859,8 +1225,9 @@ class WorldSimulationRuntime:
         with open(self.checkpoint_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
 
-        base_world_state = self._build_initial_state()
         checkpoint_world_state = payload.get("world_state") or {}
+        self._load_dynamic_agents_from_world_state(checkpoint_world_state)
+        base_world_state = self._build_initial_state()
         if isinstance(checkpoint_world_state, dict):
             base_world_state.update(checkpoint_world_state)
         self.world_state = base_world_state
@@ -1053,7 +1420,20 @@ class WorldSimulationRuntime:
         )
         primary_agent_id = safe_int(stimulus.get("primary_agent_id", 0), default=0, lower=0)
         primary_agent_name = normalize_optional_text(stimulus.get("primary_agent_name")) or "世界事件"
+        participant_ids = dedupe_keep_order(
+            [
+                *( [str(primary_agent_id)] if primary_agent_id > 0 else [] ),
+                *[str(item).strip() for item in ensure_list(stimulus.get("participant_ids")) if str(item).strip()],
+            ]
+        )
+        if not participant_ids:
+            participant_ids = [
+                str(agent_id)
+                for agent_id, agent in self.agent_index.items()
+                if self._agent_name(agent) in participants
+            ]
         priority = safe_int(stimulus.get("priority", 5), default=5, lower=1, upper=5)
+        risk_level = safe_int(stimulus.get("risk_level", priority), default=priority, lower=1, upper=5)
         duration_ticks = safe_int(
             stimulus.get("duration_ticks", 1),
             default=1,
@@ -1074,14 +1454,16 @@ class WorldSimulationRuntime:
             primary_agent_id=primary_agent_id,
             primary_agent_name=primary_agent_name[:80],
             participants=(participants or [primary_agent_name])[:8],
-            participant_ids=[primary_agent_id],
+            participant_ids=[int(value) for value in participant_ids if str(value).isdigit() and int(value) >= 0],
             source_intent_ids=[f"stimulus:{stimulus_id}"],
             priority=priority,
+            risk_level=risk_level,
             duration_ticks=duration_ticks,
             resolves_at_tick=resolves_at_tick,
             status="active",
             location=location,
             dependencies=dependencies,
+            tags=dedupe_keep_order(ensure_list(stimulus.get("tags")))[:8],
             state_impacts=self._normalize_state_impacts(stimulus.get("state_impacts")),
             source="stimulus",
             rationale=normalize_optional_text(stimulus.get("rationale"))[:220],
@@ -1369,7 +1751,710 @@ class WorldSimulationRuntime:
             plot_threads=self.plot_threads,
             pressure_tracks=self.pressure_tracks,
             initial_world_state=self.initial_world_state,
+            agent_configs=self.agent_configs,
         )
+
+    def _rebuild_agent_directory(self) -> None:
+        self.agent_configs = [dict(agent) for agent in self.base_agent_configs]
+        self.agent_configs.extend(dict(agent) for agent in self.dynamic_agent_configs)
+        self.agent_index = {
+            safe_int(agent.get("agent_id", 0), default=0, lower=0): agent
+            for agent in self.agent_configs
+            if safe_int(agent.get("agent_id", 0), default=0, lower=0) > 0
+        }
+        self.agent_name_index = {}
+        self.faction_agent_names = set()
+        for agent in self.agent_configs:
+            normalized_name = normalize_optional_text(agent.get("entity_name") or agent.get("username")).lower()
+            if normalized_name and normalized_name not in self.agent_name_index:
+                self.agent_name_index[normalized_name] = agent
+            if str(agent.get("entity_type") or "").strip().lower() == "faction":
+                faction_name = normalize_optional_text(agent.get("entity_name") or agent.get("username"))
+                if faction_name:
+                    self.faction_agent_names.add(faction_name)
+        self.actor_static_scores = {
+            safe_int(agent.get("agent_id", 0), default=0, lower=0): self._actor_static_score(agent)
+            for agent in self.agent_configs
+        }
+
+    def _load_dynamic_agents_from_world_state(self, world_state: Any) -> None:
+        self.dynamic_agent_configs = dynamic_agents_from_world_state(world_state)
+        self._rebuild_agent_directory()
+
+    def _runtime_cast_state(self) -> Dict[str, Any]:
+        runtime_cast = self.world_state.get("runtime_cast")
+        if isinstance(runtime_cast, dict):
+            return runtime_cast
+        runtime_cast = {}
+        self.world_state["runtime_cast"] = runtime_cast
+        return runtime_cast
+
+    def _next_runtime_agent_id(self) -> int:
+        runtime_cast = self._runtime_cast_state()
+        configured_next = safe_int(runtime_cast.get("next_agent_id", 0), default=0, lower=0)
+        highest_existing = max(
+            [
+                safe_int(agent.get("agent_id", 0), default=0, lower=0)
+                for agent in [*self.base_agent_configs, *self.dynamic_agent_configs]
+            ]
+            or [0]
+        )
+        next_agent_id = max(configured_next, highest_existing + 1, 1)
+        runtime_cast["next_agent_id"] = next_agent_id
+        return next_agent_id
+
+    def _sync_runtime_cast_world_state(self) -> None:
+        runtime_cast = self._runtime_cast_state()
+        history = runtime_cast.get("promotion_history")
+        if isinstance(history, list):
+            promotion_history = [item for item in history if isinstance(item, dict)][-24:]
+        else:
+            promotion_history = []
+        runtime_cast.update(
+            {
+                "schema_version": RUNTIME_CAST_SCHEMA_VERSION,
+                "next_agent_id": max(self._next_runtime_agent_id(), 1),
+                "dynamic_agents": [dict(agent) for agent in self.dynamic_agent_configs],
+                "promotion_history": promotion_history,
+                "dynamic_agent_count": len(self.dynamic_agent_configs),
+            }
+        )
+        self.world_state["runtime_cast"] = runtime_cast
+
+    def _sync_actor_conditions_world_state(self) -> None:
+        recent_updates = self.world_state.get("recent_condition_updates")
+        if recent_updates is None:
+            normalized_updates: List[Dict[str, Any]] = []
+        elif isinstance(recent_updates, list):
+            normalized_updates = [item for item in recent_updates if isinstance(item, dict)][-24:]
+        else:
+            raise ValueError("world_state.recent_condition_updates must be a list")
+
+        actor_conditions = build_actor_condition_map(
+            self.agent_configs,
+            self.world_state.get("actor_conditions"),
+        )
+        self.world_state["actor_conditions"] = actor_conditions
+        self.world_state["actor_condition_summary"] = summarize_actor_conditions(actor_conditions)
+        self.world_state["recent_condition_updates"] = normalized_updates
+        self._sync_runtime_cast_world_state()
+
+    def _actor_condition_entry(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        actor_conditions = self.world_state.get("actor_conditions")
+        if not isinstance(actor_conditions, dict):
+            return None
+        entry = actor_conditions.get(str(agent_id))
+        return entry if isinstance(entry, dict) else None
+
+    def _actor_prompt_condition(self, agent: Dict[str, Any]) -> Dict[str, Any]:
+        agent_id = self._agent_id(agent)
+        if not actor_supports_casualty(agent.get("entity_type")):
+            return {
+                "status": "operational",
+                "availability": "active",
+                "alive": True,
+                "latest_note": "",
+            }
+        entry = self._actor_condition_entry(agent_id)
+        if entry is None:
+            return {
+                "status": "healthy",
+                "availability": "active",
+                "alive": True,
+                "latest_note": "",
+            }
+        return {
+            "status": entry.get("status"),
+            "availability": entry.get("availability"),
+            "alive": entry.get("alive"),
+            "injury_score": entry.get("injury_score"),
+            "last_updated_tick": entry.get("last_updated_tick"),
+            "latest_note": entry.get("latest_note"),
+            "last_event_title": entry.get("last_event_title"),
+        }
+
+    def _actor_selection_multiplier(self, agent: Dict[str, Any]) -> float:
+        if not actor_supports_casualty(agent.get("entity_type")):
+            return 1.0
+        entry = self._actor_condition_entry(self._agent_id(agent))
+        if not entry:
+            return 1.0
+        status = str(entry.get("status") or "").strip().lower()
+        return ACTOR_CONDITION_SELECTION_MULTIPLIER.get(status, 1.0)
+
+    def _recent_condition_updates(self, limit: int = 6) -> List[Dict[str, Any]]:
+        updates = self.world_state.get("recent_condition_updates")
+        if not isinstance(updates, list):
+            return []
+        return [item for item in updates if isinstance(item, dict)][-limit:]
+
+    def _agent_affiliations(self, agent: Optional[Dict[str, Any]]) -> List[str]:
+        if not isinstance(agent, dict):
+            return []
+        agent_name = normalize_optional_text(agent.get("entity_name") or agent.get("username"))
+        if str(agent.get("entity_type") or "").strip().lower() == "faction" and agent_name:
+            return [agent_name]
+        affiliations: List[str] = []
+        for item in ensure_list(agent.get("resources")):
+            lowered = item.lower()
+            if not lowered.startswith("faction:"):
+                continue
+            faction_name = normalize_optional_text(item.split(":", 1)[1])
+            if faction_name:
+                affiliations.append(faction_name)
+        for item in ensure_list(agent.get("connected_entities")):
+            normalized = normalize_optional_text(item)
+            if normalized in self.faction_agent_names:
+                affiliations.append(normalized)
+        runtime_affiliation = normalize_optional_text(agent.get("runtime_affiliation"))
+        if runtime_affiliation:
+            affiliations.append(runtime_affiliation)
+        return dedupe_keep_order(affiliations)
+
+    def _promotable_participant_name(self, value: Any) -> str:
+        name = normalize_optional_text(value)
+        if not name or len(name) < 2 or len(name) > 32:
+            return ""
+        lowered = name.lower()
+        if lowered in self.agent_name_index:
+            return ""
+        if name in self.faction_agent_names:
+            return ""
+        if any(marker in name for marker in ("{", "}", "[", "]", "http://", "https://", " / ", "\\", "|")):
+            return ""
+        role_hint = any(token.lower() in lowered for token in (token.lower() for token in PROMOTABLE_ROLE_HINTS))
+        role_hint = role_hint or name.endswith(PROMOTABLE_ROLE_SUFFIXES)
+        looks_like_name = bool(re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,31}", name)) or bool(
+            re.fullmatch(r"[\u4e00-\u9fff·]{2,12}", name)
+        )
+        if not role_hint and not looks_like_name:
+            return ""
+        return name
+
+    def _promotion_seed_events(self) -> List[WorldEvent]:
+        ordered: List[WorldEvent] = []
+        seen: set[str] = set()
+        pools: List[WorldEvent] = list(self.completed_events[-self.dynamic_cast_recent_event_window :])
+        pools.extend(list(self.active_events.values()))
+        pools.extend(list(self.queued_events.values()))
+        for event in reversed(pools):
+            if not event.event_id or event.event_id in seen:
+                continue
+            seen.add(event.event_id)
+            ordered.append(event)
+        ordered.reverse()
+        return ordered
+
+    def _collect_promotion_candidates(self) -> List[Dict[str, Any]]:
+        candidates: Dict[str, Dict[str, Any]] = {}
+        for event in self._promotion_seed_events():
+            event_tick = max(
+                safe_int(event.resolves_at_tick, default=0, lower=0),
+                safe_int(event.tick, default=0, lower=0),
+            )
+            anchor_names = dedupe_keep_order(
+                [
+                    normalize_optional_text(event.primary_agent_name),
+                    *[
+                        normalize_optional_text(participant)
+                        for participant in event.participants
+                        if normalize_optional_text(participant).lower() in self.agent_name_index
+                    ],
+                ]
+            )
+            faction_anchors: List[str] = []
+            for anchor in anchor_names:
+                anchor_agent = self.agent_name_index.get(anchor.lower())
+                faction_anchors.extend(self._agent_affiliations(anchor_agent))
+            for participant in dedupe_keep_order(event.participants):
+                candidate_name = self._promotable_participant_name(participant)
+                if not candidate_name:
+                    continue
+                entry = candidates.setdefault(
+                    candidate_name,
+                    {
+                        "name": candidate_name,
+                        "mentions": 0,
+                        "last_tick": 0,
+                        "event_titles": [],
+                        "locations": [],
+                        "anchors": [],
+                        "factions": [],
+                        "source": "observed_participant",
+                    },
+                )
+                entry["mentions"] += 1
+                entry["last_tick"] = max(entry["last_tick"], event_tick)
+                entry["event_titles"] = dedupe_keep_order([*entry["event_titles"], event.title])[:4]
+                if normalize_optional_text(event.location):
+                    entry["locations"] = dedupe_keep_order([*entry["locations"], normalize_optional_text(event.location)])[:3]
+                entry["anchors"] = dedupe_keep_order([*entry["anchors"], *anchor_names])[:6]
+                entry["factions"] = dedupe_keep_order([*entry["factions"], *faction_anchors])[:4]
+        return sorted(
+            candidates.values(),
+            key=lambda item: (
+                item.get("mentions", 0),
+                item.get("last_tick", 0),
+                len(item.get("factions", [])),
+            ),
+            reverse=True,
+        )
+
+    def _fallback_promotion_candidate(self, tick: int, scene_title: str) -> Optional[Dict[str, Any]]:
+        faction_candidates: List[str] = []
+        for thread in self.plot_threads:
+            owner = normalize_optional_text(thread.get("owner"))
+            if owner in self.faction_agent_names:
+                faction_candidates.append(owner)
+        for event in self._promotion_seed_events():
+            owner = normalize_optional_text(event.primary_agent_name)
+            if owner in self.faction_agent_names:
+                faction_candidates.append(owner)
+            else:
+                faction_candidates.extend(self._agent_affiliations(self.agent_name_index.get(owner.lower())))
+        faction_candidates = dedupe_keep_order(faction_candidates)
+        if not faction_candidates:
+            return None
+
+        def faction_live_count(name: str) -> int:
+            actor_conditions = self.world_state.get("actor_conditions")
+            if not isinstance(actor_conditions, dict):
+                return 0
+            total = 0
+            for agent in self.agent_configs:
+                if name not in self._agent_affiliations(agent):
+                    continue
+                entry = actor_conditions.get(str(self._agent_id(agent)))
+                if isinstance(entry, dict) and str(entry.get("status") or "").strip().lower() in {
+                    "healthy",
+                    "shaken",
+                    "wounded",
+                    "critical",
+                }:
+                    total += 1
+            return total
+
+        faction_name = sorted(faction_candidates, key=lambda item: (faction_live_count(item), item))[0]
+        for seat_label in PROMOTION_FALLBACK_SEAT_LABELS:
+            candidate_name = f"{faction_name}{seat_label}"
+            if candidate_name.lower() not in self.agent_name_index:
+                return {
+                    "name": candidate_name,
+                    "mentions": 1,
+                    "last_tick": tick,
+                    "event_titles": [scene_title],
+                    "locations": [scene_title],
+                    "anchors": [faction_name],
+                    "factions": [faction_name],
+                    "source": "faction_delegate",
+                    "seat_label": seat_label,
+                }
+        return None
+
+    def _build_dynamic_agent_from_candidate(self, candidate: Dict[str, Any], tick: int, scene_title: str) -> Dict[str, Any]:
+        faction_name = normalize_optional_text((candidate.get("factions") or [""])[0])
+        connected_entities = dedupe_keep_order(
+            [
+                faction_name,
+                *[normalize_optional_text(item) for item in ensure_list(candidate.get("anchors"))],
+            ]
+        )
+        connected_entities = [item for item in connected_entities if item][:6]
+        event_titles = [normalize_optional_text(item) for item in ensure_list(candidate.get("event_titles")) if normalize_optional_text(item)]
+        home_location = normalize_optional_text((candidate.get("locations") or [""])[0]) or scene_title
+        summary = (
+            f"{candidate['name']} 在最近的关键事件里反复出现，被正式推到台前"
+            f"{f'，并与 {faction_name} 的行动链直接绑定' if faction_name else ''}。"
+        )
+        public_role = (
+            f"{candidate['name']} 是近期局势中被推上台面的新行动角色"
+            f"{f'，主要替 {faction_name} 处理前线压力' if faction_name else ''}。"
+        )
+        goals = [
+            f"protect {faction_name} leverage" if faction_name else "protect current leverage",
+            "survive the current escalation",
+            "convert local chaos into durable influence",
+        ]
+        resources = [
+            f"faction: {faction_name}" if faction_name else "runtime-promoted actor",
+            f"runtime_source: {candidate.get('source') or 'observed_participant'}",
+        ]
+        if candidate.get("seat_label"):
+            resources.append(f"seat: {candidate['seat_label']}")
+        return {
+            "agent_id": self._next_runtime_agent_id(),
+            "entity_name": candidate["name"],
+            "entity_type": "Character",
+            "public_role": public_role,
+            "driving_goals": goals,
+            "resources": resources,
+            "constraints": ["newly promoted under pressure", "limited institutional cover"],
+            "temperament": ["adaptive", "defensive", "risk_tolerant"],
+            "connected_entities": connected_entities,
+            "story_hooks": event_titles[:4] or [scene_title],
+            "home_location": home_location,
+            "summary": summary,
+            "llm_selector": self.default_actor_llm_selector,
+            "runtime_origin": normalize_optional_text(candidate.get("source")) or "observed_participant",
+            "runtime_affiliation": faction_name,
+            "runtime_seat_label": normalize_optional_text(candidate.get("seat_label")) or candidate["name"],
+            "runtime_created_tick": tick,
+        }
+
+    def _register_dynamic_agent(self, agent_payload: Dict[str, Any], tick: int, scene_title: str) -> Optional[Dict[str, Any]]:
+        normalized = normalize_agent_payload(agent_payload)
+        if not normalized:
+            return None
+        if normalize_optional_text(normalized.get("entity_name")).lower() in self.agent_name_index:
+            return None
+        self.dynamic_agent_configs.append(normalized)
+        self._rebuild_agent_directory()
+
+        actor_conditions = self.world_state.get("actor_conditions")
+        if not isinstance(actor_conditions, dict):
+            actor_conditions = {}
+            self.world_state["actor_conditions"] = actor_conditions
+        initial_entry = initial_actor_condition(normalized)
+        if initial_entry is not None:
+            actor_conditions[str(initial_entry["agent_id"])] = initial_entry
+        self.world_state["actor_condition_summary"] = summarize_actor_conditions(actor_conditions)
+
+        runtime_cast = self._runtime_cast_state()
+        history = runtime_cast.get("promotion_history")
+        if isinstance(history, list):
+            promotion_history = [item for item in history if isinstance(item, dict)]
+        else:
+            promotion_history = []
+        promotion_history.append(
+            {
+                "tick": tick,
+                "scene_title": scene_title,
+                "agent_id": normalized["agent_id"],
+                "entity_name": normalized["entity_name"],
+                "runtime_origin": normalized.get("runtime_origin"),
+                "runtime_affiliation": normalized.get("runtime_affiliation"),
+            }
+        )
+        runtime_cast["promotion_history"] = promotion_history[-24:]
+        runtime_cast["next_agent_id"] = max(
+            safe_int(runtime_cast.get("next_agent_id", 0), default=0, lower=0),
+            normalized["agent_id"] + 1,
+        )
+        self._sync_runtime_cast_world_state()
+        self._write_meta_event(
+            {
+                "event_type": "actor_promoted",
+                "timestamp": now_iso(),
+                "simulation_mode": "world",
+                "round": tick,
+                "tick": tick,
+                "scene_title": scene_title,
+                "agent_id": normalized["agent_id"],
+                "agent_name": normalized["entity_name"],
+                "runtime_origin": normalized.get("runtime_origin"),
+                "runtime_affiliation": normalized.get("runtime_affiliation"),
+                "summary": (
+                    f"{normalized['entity_name']} is promoted into the formal cast"
+                    f"{' for ' + str(normalized.get('runtime_affiliation')) if normalized.get('runtime_affiliation') else ''}."
+                ),
+            }
+        )
+        return normalized
+
+    def _maybe_promote_dynamic_agents(self, tick: int, scene_title: str) -> List[Dict[str, Any]]:
+        if not self.dynamic_cast_enabled:
+            return []
+        active_count = safe_int(
+            (self.world_state.get("actor_condition_summary") or {}).get("active", 0),
+            default=0,
+            lower=0,
+        )
+        if active_count >= self.dynamic_cast_frontstage_floor:
+            return []
+        remaining_capacity = max(self.dynamic_cast_max_agents - len(self.dynamic_agent_configs), 0)
+        if remaining_capacity <= 0:
+            return []
+
+        promotion_limit = min(max(self.dynamic_cast_frontstage_floor - active_count, 1), remaining_capacity, 2)
+        mention_threshold = 1 if active_count <= 1 else self.dynamic_cast_min_candidate_mentions
+        promoted: List[Dict[str, Any]] = []
+
+        for candidate in self._collect_promotion_candidates():
+            if safe_int(candidate.get("mentions", 0), default=0, lower=0) < mention_threshold:
+                continue
+            created = self._register_dynamic_agent(
+                self._build_dynamic_agent_from_candidate(candidate, tick, scene_title),
+                tick=tick,
+                scene_title=scene_title,
+            )
+            if not created:
+                continue
+            promoted.append(created)
+            if len(promoted) >= promotion_limit:
+                return promoted
+
+        while len(promoted) < promotion_limit:
+            candidate = self._fallback_promotion_candidate(tick, scene_title)
+            if not candidate:
+                break
+            created = self._register_dynamic_agent(
+                self._build_dynamic_agent_from_candidate(candidate, tick, scene_title),
+                tick=tick,
+                scene_title=scene_title,
+            )
+            if not created:
+                break
+            promoted.append(created)
+
+        return promoted
+
+    def _merge_tags(
+        self,
+        intents: List[ActorIntent],
+        override_payload: Any = None,
+    ) -> List[str]:
+        if override_payload not in (None, "", [], {}):
+            return dedupe_keep_order(ensure_list(override_payload))[:8]
+        return dedupe_keep_order(
+            [tag for intent in intents for tag in ensure_list(intent.tags)]
+        )[:8]
+
+    def _event_condition_profile(self, event: WorldEvent) -> Dict[str, Any]:
+        combined = " ".join(
+            [
+                normalize_optional_text(event.title),
+                normalize_optional_text(event.summary),
+                " ".join(ensure_list(event.tags)),
+            ]
+        ).lower()
+        conflict_pressure = safe_float(
+            self.world_state.get("pressure_tracks", {}).get("conflict", self.world_state.get("tension", 0.35)),
+            0.35,
+        )
+        tension = safe_float(self.world_state.get("tension", 0.35), 0.35)
+        direct_violence = any(token in combined for token in DIRECT_VIOLENCE_TOKENS)
+        lethal_violence = any(token in combined for token in LETHAL_VIOLENCE_TOKENS)
+        low_stakes = any(token in combined for token in LOW_STAKES_TOKENS)
+        hazard = (
+            0.08
+            + (max(event.risk_level - 2, 0) * 0.11)
+            + (max(event.priority - 3, 0) * 0.07)
+            + (max(conflict_pressure - 0.45, 0.0) * 0.28)
+            + (max(tension - 0.50, 0.0) * 0.16)
+            + (max(safe_float(event.state_impacts.get("conflict", 0.0), 0.0), 0.0) * 0.45)
+            + (0.24 if direct_violence else 0.0)
+            + (0.16 if lethal_violence else 0.0)
+            - (0.18 if low_stakes else 0.0)
+        )
+        hazard = clamp(hazard, 0.0, 0.95)
+        return {
+            "hazard": hazard,
+            "violent": direct_violence or lethal_violence or hazard >= 0.42,
+            "fatal": lethal_violence or hazard >= 0.78,
+        }
+
+    def _apply_condition_updates(self, event: WorldEvent, tick: int) -> List[Dict[str, Any]]:
+        actor_conditions = self.world_state.get("actor_conditions")
+        if not isinstance(actor_conditions, dict):
+            return []
+
+        profile = self._event_condition_profile(event)
+        if not profile["violent"]:
+            return []
+
+        condition_labels = {
+            "shaken": "受震",
+            "wounded": "负伤",
+            "critical": "重伤",
+            "incapacitated": "失去行动能力",
+            "dead": "死亡",
+        }
+        updates: List[Dict[str, Any]] = []
+        candidate_ids = dedupe_keep_order(
+            [
+                str(event.primary_agent_id),
+                *[str(participant_id) for participant_id in event.participant_ids],
+            ]
+        )
+
+        for index, raw_actor_id in enumerate(candidate_ids):
+            if not str(raw_actor_id).isdigit():
+                continue
+            actor_id = int(raw_actor_id)
+            agent = self.agent_index.get(actor_id)
+            if not agent or not actor_supports_casualty(agent.get("entity_type")):
+                continue
+
+            key = str(actor_id)
+            current = actor_conditions.get(key)
+            if not isinstance(current, dict):
+                continue
+            current_score = safe_int(current.get("injury_score", 0), default=0, lower=0, upper=5)
+            if current_score >= 5:
+                continue
+
+            importance = min(self.actor_static_scores.get(actor_id, 0), 24)
+            importance_shield = min(0.16, importance * 0.0055)
+            base = profile["hazard"] + (0.05 if index == 0 else 0.0)
+            if current_score >= 2:
+                base += 0.04
+            if current_score >= 3:
+                base += 0.03
+
+            death_prob = clamp(
+                ((base - 0.82) * 0.55)
+                + (0.08 if profile["fatal"] else 0.0)
+                - importance_shield,
+                0.0,
+                0.22,
+            )
+            incapacitated_prob = clamp(
+                ((base - 0.66) * 0.70)
+                + (0.05 if profile["fatal"] else 0.0)
+                - (importance_shield * 0.4),
+                0.0,
+                0.32,
+            )
+            critical_prob = clamp(((base - 0.48) * 0.78) + 0.06, 0.0, 0.46)
+            wounded_prob = clamp(((base - 0.30) * 0.92) + 0.10, 0.0, 0.68)
+            shaken_prob = clamp(((base - 0.18) * 0.95) + 0.12, 0.0, 0.82)
+
+            roll = self.rng.random()
+            next_score = current_score
+            threshold = 0.0
+            death_allowed = profile["fatal"] or current_score >= 3
+            if death_allowed:
+                threshold += death_prob
+            if death_allowed and roll < threshold:
+                next_score = 5
+            else:
+                threshold += incapacitated_prob
+                if roll < threshold:
+                    next_score = max(current_score, 4)
+                else:
+                    threshold += critical_prob
+                    if roll < threshold:
+                        next_score = max(current_score, 3)
+                    else:
+                        threshold += wounded_prob
+                        if roll < threshold:
+                            next_score = max(current_score + 1, 2)
+                        else:
+                            threshold += shaken_prob
+                            if roll < threshold:
+                                next_score = max(current_score, 1)
+
+            if next_score <= current_score:
+                continue
+
+            previous_status = actor_condition_status(current_score)
+            next_status = actor_condition_status(next_score)
+            entity_name = str(current.get("entity_name") or self._agent_name(agent)).strip()
+            note = f"{entity_name} 在「{event.title}」中{condition_labels.get(next_status, next_status)}。"
+            updated_entry = dict(current)
+            updated_entry.update(
+                {
+                    "status": next_status,
+                    "injury_score": next_score,
+                    "alive": next_status != "dead",
+                    "availability": actor_condition_availability(next_status),
+                    "last_updated_tick": tick,
+                    "last_event_id": event.event_id,
+                    "last_event_title": event.title,
+                    "latest_note": note,
+                }
+            )
+            actor_conditions[key] = updated_entry
+            updates.append(
+                {
+                    "tick": tick,
+                    "event_id": event.event_id,
+                    "event_title": event.title,
+                    "agent_id": actor_id,
+                    "agent_name": entity_name,
+                    "from_status": previous_status,
+                    "to_status": next_status,
+                    "summary": note,
+                }
+            )
+
+        if updates:
+            recent_updates = self._recent_condition_updates(limit=24)
+            recent_updates.extend(updates)
+            self.world_state["recent_condition_updates"] = recent_updates[-24:]
+            self.world_state["actor_condition_summary"] = summarize_actor_conditions(actor_conditions)
+        return updates
+
+    def _recover_actor_conditions(self, tick: int) -> List[Dict[str, Any]]:
+        actor_conditions = self.world_state.get("actor_conditions")
+        if not isinstance(actor_conditions, dict):
+            return []
+
+        recovered: List[Dict[str, Any]] = []
+        for key, entry in actor_conditions.items():
+            if not isinstance(entry, dict):
+                continue
+            actor_id = safe_int(key, default=0, lower=0)
+            if actor_id <= 0:
+                continue
+            current_score = safe_int(entry.get("injury_score", 0), default=0, lower=0, upper=5)
+            if current_score <= 0 or current_score >= 5:
+                continue
+
+            last_touched = max(
+                safe_int(entry.get("last_updated_tick", 0), default=0, lower=0),
+                self.actor_last_event_tick.get(actor_id, 0),
+                self.actor_last_selected_tick.get(actor_id, 0),
+            )
+            rest_gap = tick - last_touched
+            required_gap = (
+                4
+                if current_score == 1
+                else 6
+                if current_score == 2
+                else 10
+                if current_score == 3
+                else self.incapacitated_recovery_ticks
+            )
+            if rest_gap < required_gap:
+                continue
+
+            next_score = 3 if current_score == 4 else max(current_score - 1, 0)
+            next_status = actor_condition_status(next_score)
+            entity_name = str(entry.get("entity_name") or f"Actor {actor_id}").strip()
+            note = f"{entity_name} 在短暂喘息后恢复到 {next_status} 状态。"
+            updated_entry = dict(entry)
+            updated_entry.update(
+                {
+                    "status": next_status,
+                    "injury_score": next_score,
+                    "alive": True,
+                    "availability": actor_condition_availability(next_status),
+                    "last_updated_tick": tick,
+                    "latest_note": note,
+                }
+            )
+            actor_conditions[key] = updated_entry
+            recovered.append(
+                {
+                    "tick": tick,
+                    "event_id": "",
+                    "event_title": "condition_recovery",
+                    "agent_id": actor_id,
+                    "agent_name": entity_name,
+                    "from_status": actor_condition_status(current_score),
+                    "to_status": next_status,
+                    "summary": note,
+                    "kind": "recovery",
+                }
+            )
+
+        if recovered:
+            recent_updates = self._recent_condition_updates(limit=24)
+            recent_updates.extend(recovered)
+            self.world_state["recent_condition_updates"] = recent_updates[-24:]
+            self.world_state["actor_condition_summary"] = summarize_actor_conditions(actor_conditions)
+        return recovered
 
     def _extract_embedded_json_object(self, text: str) -> Dict[str, Any]:
         normalized = str(text or "").strip()
@@ -1662,6 +2747,8 @@ class WorldSimulationRuntime:
 
             self._promote_queued_events(tick)
             self._inject_stimuli(tick, scene_title)
+            self._recover_actor_conditions(tick)
+            self._maybe_promote_dynamic_agents(tick, scene_title)
             self._write_meta_event(
                 {
                     "event_type": "tick_start",
@@ -1842,23 +2929,36 @@ class WorldSimulationRuntime:
         if not self.agent_configs:
             return []
         scene_title = self._scene_title(tick)
-        target_count = min(self.intent_agents_per_tick, len(self.agent_configs))
-        if target_count >= len(self.agent_configs):
-            selected = list(self.agent_configs)
+        available_agents = [
+            agent for agent in self.agent_configs if self._actor_selection_multiplier(agent) > 0
+        ]
+        if not available_agents:
+            return []
+        target_count = min(self.intent_agents_per_tick, len(available_agents))
+        if target_count >= len(available_agents):
+            selected = list(available_agents)
         else:
             scored_agents: List[Dict[str, Any]] = []
-            for agent in self.agent_configs:
+            for agent in available_agents:
                 agent_id = self._agent_id(agent)
+                availability = self._actor_selection_multiplier(agent)
+                if availability <= 0:
+                    continue
+                static_score = self.actor_static_scores.get(agent_id, 0)
+                heat_score = self._actor_heat_score(agent, tick, scene_title)
                 scored_agents.append(
                     {
                         "agent": agent,
                         "agent_id": agent_id,
-                        "static": self.actor_static_scores.get(agent_id, 0),
-                        "heat": self._actor_heat_score(agent, tick, scene_title),
+                        "static": round(static_score * availability, 3),
+                        "heat": round(heat_score * availability, 3),
                         "gap": self._actor_selection_gap(agent_id, tick),
                         "selected_count": self.actor_selection_counts.get(agent_id, 0),
+                        "availability": availability,
                     }
                 )
+            if not scored_agents:
+                return []
             selected_ids = set()
             selected: List[Dict[str, Any]] = []
 
@@ -1888,6 +2988,7 @@ class WorldSimulationRuntime:
                 scored_agents,
                 key=lambda item: (
                     item["static"] + item["heat"],
+                    item["availability"],
                     item["static"],
                     item["gap"],
                     -item["selected_count"],
@@ -1903,6 +3004,7 @@ class WorldSimulationRuntime:
                     scored_agents,
                     key=lambda item: (
                         item["heat"],
+                        item["availability"],
                         item["gap"],
                         item["static"],
                         -item["selected_count"],
@@ -1922,6 +3024,7 @@ class WorldSimulationRuntime:
                         (item["gap"] * 1.2)
                         + (item["heat"] * 0.35)
                         + (item["static"] * 0.15)
+                        + (item["availability"] * 1.5)
                         - (item["selected_count"] * 0.08),
                         0.1,
                     )
@@ -1966,6 +3069,7 @@ class WorldSimulationRuntime:
         return (
             "你是一个世界观自动推进系统中的角色意图生成器。"
             "你的任务不是分析局势，而是替该角色给出本 tick 会执行的一个具体下一步动作。"
+            "角色若已受伤、濒危、失能或死亡，必须忠于该状态；高风险暴力行动会带来持续性的伤亡后果。"
             "必须输出一个 JSON 对象，字段只允许包含："
             "objective, summary, location, target, desired_duration, priority, urgency, "
             "risk_level, dependencies, participants, tags, state_impacts, rationale。"
@@ -1984,6 +3088,7 @@ class WorldSimulationRuntime:
         return (
             "你是世界模拟的并发事件裁决器。当前只处理同一 front 的一小簇角色意图，"
             "请把这些意图整理成可并行推进的世界事件。"
+            "直接暴力与极端行动会被持久写回人物状态，不要把高代价冲突包装成无后果的口号。"
             "只允许输出一个 JSON 对象，字段严格为 accepted_events, deferred_intents, rejected_intents。"
             "accepted_events 每项必须包含 title, summary, owner_intent_id, supporting_intent_ids, "
             "priority, duration_ticks, location, dependencies, participants, state_impacts, rationale。"
@@ -2025,6 +3130,7 @@ class WorldSimulationRuntime:
             "active_events": active_brief,
             "queued_events": queued_brief,
             "recent_completed_events": completed_brief,
+            "recent_condition_updates": self._recent_condition_updates(limit=5),
             "actor_profile": {
                 "agent_id": agent.get("agent_id", 0),
                 "entity_name": agent_name,
@@ -2037,6 +3143,7 @@ class WorldSimulationRuntime:
                 "story_hooks": clip_list(agent.get("story_hooks", []), 80, 3),
                 "home_location": clip_text(agent.get("home_location", ""), 60),
                 "summary": clip_text(agent.get("summary", ""), 180),
+                "condition": self._actor_prompt_condition(agent),
             },
             "output_contract": {
                 "must_choose_one_concrete_action": True,
@@ -2736,6 +3843,181 @@ class WorldSimulationRuntime:
 
         return cleaned_objective[:220], cleaned_summary[:320]
 
+    def _coerce_score_hint(self, value: Any, *, lower: int = 1, upper: int = 5) -> Optional[int]:
+        if value in (None, "", [], {}):
+            return None
+        if isinstance(value, (int, float)):
+            return safe_int(value, default=lower, lower=lower, upper=upper)
+        text = normalize_optional_text(value).lower()
+        if not text:
+            return None
+        digits = re.findall(r"\d+", text)
+        if digits:
+            return safe_int(int(digits[-1]), default=lower, lower=lower, upper=upper)
+        for marker, mapped in (
+            ("critical", 5),
+            ("very high", 5),
+            ("immediate", 5),
+            ("urgent", 5),
+            ("high", 4),
+            ("medium", 3),
+            ("moderate", 3),
+            ("mid", 3),
+            ("low", 2),
+        ):
+            if marker in text:
+                return safe_int(mapped, default=lower, lower=lower, upper=upper)
+        return None
+
+    def _coerce_duration_hint(self, *values: Any) -> Optional[int]:
+        for value in values:
+            score = self._coerce_score_hint(value, lower=1, upper=self.max_event_duration)
+            if score is not None:
+                return score
+        return None
+
+    def _normalize_state_impacts_aliases(self, payload: Any) -> Dict[str, float]:
+        if not isinstance(payload, dict):
+            return {}
+        normalized: Dict[str, Any] = {}
+        for key, value in payload.items():
+            name = str(key or "").strip().lower()
+            if not name:
+                continue
+            if name.startswith("on_"):
+                name = name[3:]
+            if name in {"conflict", "scarcity", "legitimacy", "momentum", "stability", "tension"}:
+                normalized[name] = value
+        return self._normalize_state_impacts(normalized)
+
+    def _coerce_actor_intent_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(response, dict):
+            return {}
+
+        payload = dict(response)
+        action = payload.get("chosen_action")
+        action_payload = action if isinstance(action, dict) else {}
+        timing_payload = payload.get("timing")
+        timing = timing_payload if isinstance(timing_payload, dict) else {}
+
+        def first_text(*values: Any) -> str:
+            for value in values:
+                text = normalize_optional_text(value)
+                if text:
+                    return text
+            return ""
+
+        def first_list(*values: Any) -> List[str]:
+            for value in values:
+                items = ensure_list(value)
+                if items:
+                    return items
+            return []
+
+        objective = first_text(
+            payload.get("objective"),
+            action_payload.get("objective"),
+            payload.get("title"),
+            action_payload.get("title"),
+        )
+        summary = first_text(
+            payload.get("summary"),
+            action_payload.get("summary"),
+            action_payload.get("objective"),
+            payload.get("objective"),
+        )
+        location = first_text(
+            payload.get("location"),
+            action_payload.get("location"),
+            payload.get("target_location"),
+            action_payload.get("target_location"),
+        )
+        targets = first_list(
+            payload.get("targets"),
+            action_payload.get("targets"),
+        )
+        target = first_text(
+            payload.get("target"),
+            action_payload.get("target"),
+            " / ".join(targets[:2]) if targets else "",
+        )
+        dependencies = first_list(
+            payload.get("dependencies"),
+            action_payload.get("dependencies"),
+            payload.get("dependencies_used"),
+            action_payload.get("dependencies_used"),
+        )
+        participants = first_list(
+            payload.get("participants"),
+            action_payload.get("participants"),
+        )
+        tags = first_list(
+            payload.get("tags"),
+            action_payload.get("tags"),
+        )
+
+        state_impacts = self._normalize_state_impacts(
+            payload.get("state_impacts") or action_payload.get("state_impacts")
+        )
+        if not state_impacts:
+            state_impacts = self._normalize_state_impacts_aliases(
+                action_payload.get("expected_effects") or payload.get("expected_effects")
+            )
+
+        coerced = dict(payload)
+        if objective:
+            coerced["objective"] = objective
+        if summary:
+            coerced["summary"] = summary
+        if location:
+            coerced["location"] = location
+        if target:
+            coerced["target"] = target
+        if dependencies:
+            coerced["dependencies"] = dependencies
+        if participants:
+            coerced["participants"] = participants
+        if tags:
+            coerced["tags"] = tags
+        if state_impacts:
+            coerced["state_impacts"] = state_impacts
+
+        desired_duration = self._coerce_duration_hint(
+            payload.get("desired_duration"),
+            action_payload.get("desired_duration"),
+            timing.get("duration"),
+            action_payload.get("time_horizon"),
+            payload.get("time_horizon"),
+        )
+        if desired_duration is not None:
+            coerced["desired_duration"] = desired_duration
+
+        priority = self._coerce_score_hint(payload.get("priority"))
+        if priority is None:
+            priority = self._coerce_score_hint(action_payload.get("priority"))
+        if priority is not None:
+            coerced["priority"] = priority
+
+        urgency = self._coerce_score_hint(payload.get("urgency"))
+        if urgency is None:
+            urgency = self._coerce_score_hint(action_payload.get("urgency"))
+        if urgency is None:
+            urgency = self._coerce_score_hint(timing.get("urgency"))
+        if urgency is not None:
+            coerced["urgency"] = urgency
+
+        risk_level = self._coerce_score_hint(payload.get("risk_level"))
+        if risk_level is None:
+            risk_level = self._coerce_score_hint(action_payload.get("risk_level"))
+        if risk_level is not None:
+            coerced["risk_level"] = risk_level
+
+        rationale = first_text(payload.get("rationale"), action_payload.get("rationale"))
+        if rationale:
+            coerced["rationale"] = rationale
+
+        return coerced
+
     def _intent_is_low_signal(self, intent: ActorIntent) -> bool:
         if self._has_json_key_leakage(intent.objective) or self._has_json_key_leakage(intent.summary):
             return True
@@ -2772,6 +4054,7 @@ class WorldSimulationRuntime:
         response: Dict[str, Any],
         source: str,
     ) -> ActorIntent:
+        response = self._coerce_actor_intent_response(response)
         agent_id = safe_int(agent.get("agent_id", 0), default=0, lower=0)
         agent_name = str(agent.get("entity_name") or agent.get("username") or f"Actor {agent_id}")
         raw_objective = str(response.get("objective") or response.get("summary") or "advance current leverage").strip()
@@ -3713,6 +4996,12 @@ class WorldSimulationRuntime:
                 lower=1,
                 upper=5,
             ),
+            risk_level=safe_int(
+                item.get("risk_level", max(intent.risk_level for intent in source_intents)),
+                default=max(intent.risk_level for intent in source_intents),
+                lower=1,
+                upper=5,
+            ),
             duration_ticks=duration,
             resolves_at_tick=tick + duration - 1,
             status=(
@@ -3722,6 +5011,7 @@ class WorldSimulationRuntime:
             ),
             location=normalize_optional_text(item.get("location") or primary_intent.location),
             dependencies=dependencies,
+            tags=self._merge_tags(source_intents, item.get("tags")),
             state_impacts=self._merge_state_impacts(source_intents, item.get("state_impacts")),
             source=source,
             rationale=str(item.get("rationale", "")).strip()[:220],
@@ -5040,11 +6330,13 @@ class WorldSimulationRuntime:
                 participant_ids=dedupe_keep_order([str(intent.agent_id) for intent in source_intents]),
                 source_intent_ids=[intent.intent_id for intent in source_intents],
                 priority=max(intent.priority for intent in source_intents),
+                risk_level=max(intent.risk_level for intent in source_intents),
                 duration_ticks=duration,
                 resolves_at_tick=tick + duration - 1,
                 status="queued" if dependencies else "active",
                 location=str(location).strip()[:120],
                 dependencies=dependencies,
+                tags=self._merge_tags(source_intents),
                 state_impacts=self._merge_state_impacts(source_intents),
                 source=source,
                 rationale=f"grouped by cluster focus: {cluster_focus}",
@@ -5172,6 +6464,7 @@ class WorldSimulationRuntime:
             self.completed_events.append(event)
             completed.append(event)
             self._apply_event_impacts(event)
+            event.condition_updates = self._apply_condition_updates(event, tick)
             self._write_action(event.complete_log(tick, len(self.active_events), len(self.queued_events)))
 
         return completed
@@ -5243,6 +6536,11 @@ class WorldSimulationRuntime:
                 "pressure_tracks": self.world_state.get("pressure_tracks", {}),
                 "pressure_levels": self.world_state.get("pressure_tracks", {}),
                 "focus_threads": self.world_state.get("focus_threads", []),
+                "starting_condition": self.world_state.get("starting_condition", ""),
+                "actor_conditions": self.world_state.get("actor_conditions", {}),
+                "actor_condition_summary": self.world_state.get("actor_condition_summary", {}),
+                "recent_condition_updates": self._recent_condition_updates(limit=12),
+                "runtime_cast": self.world_state.get("runtime_cast", {}),
                 "last_tick_summary": summary,
             },
             "metrics": {
@@ -5253,6 +6551,7 @@ class WorldSimulationRuntime:
                 "active_events_count": len(self.active_events),
                 "queued_events_count": len(self.queued_events),
                 "completed_events_count": len(self.completed_events),
+                "condition_updates_count": sum(len(event.condition_updates) for event in completed_this_tick),
             },
             "active_events": [event.to_state_dict() for event in self.active_events.values()],
             "queued_events": [event.to_state_dict() for event in self.queued_events.values()],
@@ -5271,6 +6570,17 @@ class WorldSimulationRuntime:
     ) -> str:
         completed_titles = "、".join(event.title for event in completed_this_tick[:3])
         active_titles = "、".join(event.title for event in list(self.active_events.values())[:3])
+        condition_updates = [
+            update
+            for event in completed_this_tick
+            for update in event.condition_updates
+            if isinstance(update, dict)
+        ]
+        serious_updates = [
+            update
+            for update in condition_updates
+            if str(update.get("to_status") or "").strip().lower() in {"critical", "incapacitated", "dead"}
+        ]
         total_intents = max(
             intent_count,
             resolution["accepted_count"] + resolution["deferred_count"] + resolution["rejected_count"],
@@ -5286,6 +6596,14 @@ class WorldSimulationRuntime:
             summary += f" 本轮完成的关键事件包括：{completed_titles}。"
         if active_titles:
             summary += f" 仍在推进的主线有：{active_titles}。"
+        if serious_updates:
+            highlights = "；".join(
+                clip_text(str(update.get("summary") or ""), 44)
+                for update in serious_updates[:2]
+                if str(update.get("summary") or "").strip()
+            )
+            if highlights:
+                summary += f" 本轮出现了不可逆代价：{highlights}"
         return summary
 
     def _write_snapshot(self, snapshot: Dict[str, Any]) -> None:
@@ -5470,11 +6788,27 @@ class WorldSimulationRuntime:
         self._write_action(payload)
 
     def _world_state_brief(self) -> Dict[str, Any]:
+        runtime_cast = self.world_state.get("runtime_cast")
+        if isinstance(runtime_cast, dict):
+            promotion_history = runtime_cast.get("promotion_history")
+            if isinstance(promotion_history, list):
+                recent_promotions = [item for item in promotion_history if isinstance(item, dict)][-3:]
+            else:
+                recent_promotions = []
+            runtime_cast_brief = {
+                "dynamic_agent_count": safe_int(runtime_cast.get("dynamic_agent_count", 0), default=0, lower=0),
+                "recent_promotions": recent_promotions,
+            }
+        else:
+            runtime_cast_brief = {}
         return {
             "tension": self.world_state.get("tension"),
             "stability": self.world_state.get("stability"),
             "momentum": self.world_state.get("momentum"),
             "pressure_tracks": self.world_state.get("pressure_tracks", {}),
+            "actor_condition_summary": self.world_state.get("actor_condition_summary", {}),
+            "recent_condition_updates": self._recent_condition_updates(limit=4),
+            "runtime_cast": runtime_cast_brief,
             "last_tick_summary": self.world_state.get("last_tick_summary", ""),
         }
 
@@ -5485,10 +6819,13 @@ class WorldSimulationRuntime:
             "summary": event.summary,
             "status": event.status,
             "priority": event.priority,
+            "risk_level": event.risk_level,
             "participants": event.participants[:4],
+            "tags": event.tags[:4],
             "dependencies": event.dependencies,
             "resolves_at_tick": event.resolves_at_tick,
             "location": event.location,
+            "condition_updates": event.condition_updates[:3],
         }
 
 
@@ -5670,14 +7007,33 @@ def restore_world_checkpoint_from_logs(
     if run_total_rounds < target_tick:
         run_total_rounds = target_tick + 1
 
+    snapshot_world_state = target_snapshot.get("world_state") or {}
+    resolved_agent_configs = [
+        *(config.get("agent_configs") or []),
+        *dynamic_agents_from_world_state(snapshot_world_state),
+    ]
     base_world_state = build_initial_world_state(
         plot_threads=config.get("plot_threads", []),
         pressure_tracks=config.get("pressure_tracks", []),
         initial_world_state=config.get("initial_world_state", {}),
+        agent_configs=resolved_agent_configs,
     )
-    snapshot_world_state = target_snapshot.get("world_state") or {}
     if isinstance(snapshot_world_state, dict):
         base_world_state.update(snapshot_world_state)
+    base_world_state["actor_conditions"] = build_actor_condition_map(
+        resolved_agent_configs,
+        base_world_state.get("actor_conditions"),
+    )
+    base_world_state["actor_condition_summary"] = summarize_actor_conditions(
+        base_world_state["actor_conditions"]
+    )
+    recent_condition_updates = base_world_state.get("recent_condition_updates")
+    if isinstance(recent_condition_updates, list):
+        base_world_state["recent_condition_updates"] = [
+            item for item in recent_condition_updates if isinstance(item, dict)
+        ][-24:]
+    else:
+        base_world_state["recent_condition_updates"] = []
     base_world_state["active_event_ids"] = [item["event_id"] for item in normalized_active_events]
     base_world_state["queued_event_ids"] = [item["event_id"] for item in normalized_queued_events]
     base_world_state["completed_event_ids"] = [
@@ -5688,7 +7044,7 @@ def restore_world_checkpoint_from_logs(
     restored_snapshot["active_events"] = normalized_active_events
     restored_snapshot["queued_events"] = normalized_queued_events
     restored_snapshot["recent_completed_events"] = normalized_completed_events[-12:]
-    restored_snapshot["world_state"] = dict(target_snapshot.get("world_state") or {})
+    restored_snapshot["world_state"] = dict(base_world_state)
     restored_snapshot["phase"] = restored_snapshot.get("phase") or "tick_complete"
     restored_snapshot["simulated_hours"] = round(target_tick * minutes_per_round / 60, 2)
 

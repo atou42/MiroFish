@@ -4,8 +4,11 @@ World mode report generation and chat.
 
 import json
 import os
+import signal
+import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -31,6 +34,42 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+class WorldReportLLMTimeoutError(TimeoutError):
+    """Raised when a world report LLM call exceeds the hard timeout."""
+
+
+@contextmanager
+def _hard_timeout(seconds: float, label: str):
+    timeout_seconds = float(seconds or 0)
+    supports_alarm = (
+        timeout_seconds > 0
+        and threading.current_thread() is threading.main_thread()
+        and hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and hasattr(signal, "getitimer")
+        and hasattr(signal, "ITIMER_REAL")
+    )
+    if not supports_alarm:
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def _handler(signum, frame):
+        raise WorldReportLLMTimeoutError(f"{label} timed out after {timeout_seconds:.2f}s")
+
+    signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer and (previous_timer[0] > 0 or previous_timer[1] > 0):
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
 class WorldReportAgent:
     def __init__(
         self,
@@ -51,6 +90,19 @@ class WorldReportAgent:
                 self.llm = None
         self.report_logger: Optional[ReportLogger] = None
         self.console_logger: Optional[ReportConsoleLogger] = None
+
+    def _llm_timeout_seconds(self) -> float:
+        raw = _clean_text(os.environ.get("WORLD_REPORT_LLM_TIMEOUT_SECONDS"))
+        if raw:
+            try:
+                return max(float(raw), 0.0)
+            except ValueError:
+                logger.warning(f"Invalid WORLD_REPORT_LLM_TIMEOUT_SECONDS value: {raw}")
+        return WORLD_REPORT_LLM_TIMEOUT_SECONDS
+
+    def _call_llm_with_hard_timeout(self, fn: Callable[[], Any], *, label: str) -> Any:
+        with _hard_timeout(self._llm_timeout_seconds(), label):
+            return fn()
 
     def generate_report(
         self,
@@ -367,32 +419,36 @@ class WorldReportAgent:
             return default_outline
 
         try:
-            response = self.llm.chat_json(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "你在为世界观推进模拟撰写报告大纲。"
-                            "返回 JSON，字段包含 title,summary,sections。"
-                            "sections 是对象数组，每项包含 title。"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "simulation_requirement": self.simulation_requirement,
-                                "world_state": context.get("world_state", {}),
-                                "action_types": context.get("action_types", {}),
-                                "top_actors": context.get("top_actors", {}),
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                temperature=0.4,
-                max_tokens=700,
-                timeout=WORLD_REPORT_LLM_TIMEOUT_SECONDS,
+            timeout_seconds = self._llm_timeout_seconds()
+            response = self._call_llm_with_hard_timeout(
+                lambda: self.llm.chat_json(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "你在为世界观推进模拟撰写报告大纲。"
+                                "返回 JSON，字段包含 title,summary,sections。"
+                                "sections 是对象数组，每项包含 title。"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {
+                                    "simulation_requirement": self.simulation_requirement,
+                                    "world_state": context.get("world_state", {}),
+                                    "action_types": context.get("action_types", {}),
+                                    "top_actors": context.get("top_actors", {}),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    ],
+                    temperature=0.4,
+                    max_tokens=700,
+                    timeout=timeout_seconds,
+                ),
+                label="world report outline llm call",
             )
             sections = [
                 ReportSection(title=item.get("title", f"章节 {index + 1}"))
@@ -405,6 +461,11 @@ class WorldReportAgent:
                     sections=sections[:6],
                 )
         except Exception as exc:
+            if self.report_logger:
+                self.report_logger.log_error(
+                    f"outline llm failed, using fallback: {exc}",
+                    "planning",
+                )
             logger.warning(f"World outline generation fallback: {exc}")
 
         return default_outline
@@ -416,35 +477,45 @@ class WorldReportAgent:
             return self._fallback_section_content(section_title, context, payload)
 
         try:
-            response = self.llm.chat(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "你在撰写世界观自动推进报告的单章内容。"
-                            "输出中文 markdown，聚焦具体事件、角色变化和下一阶段含义。"
-                            "不要重复其它章节，不要只复述 Tick 1。"
-                            "必须基于 section_payload 的视角写出这一章。"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "section_title": section_title,
-                                "section_payload": payload,
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                temperature=0.4,
-                max_tokens=1200,
-                timeout=WORLD_REPORT_LLM_TIMEOUT_SECONDS,
+            timeout_seconds = self._llm_timeout_seconds()
+            response = self._call_llm_with_hard_timeout(
+                lambda: self.llm.chat(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "你在撰写世界观自动推进报告的单章内容。"
+                                "输出中文 markdown，聚焦具体事件、角色变化和下一阶段含义。"
+                                "不要重复其它章节，不要只复述 Tick 1。"
+                                "必须基于 section_payload 的视角写出这一章。"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {
+                                    "section_title": section_title,
+                                    "section_payload": payload,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    ],
+                    temperature=0.4,
+                    max_tokens=1200,
+                    timeout=timeout_seconds,
+                ),
+                label=f"world report section llm call [{section_title}]",
             )
             if response.strip():
                 return response.strip()
         except Exception as exc:
+            if self.report_logger:
+                self.report_logger.log_error(
+                    f"section llm failed, using fallback: {exc}",
+                    "generating",
+                    section_title=section_title,
+                )
             logger.warning(f"World section generation fallback: {exc}")
 
         return self._fallback_section_content(section_title, context, payload)

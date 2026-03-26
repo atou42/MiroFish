@@ -101,3 +101,27 @@ def test_stimulus_persists_in_checkpoint(tmp_path, monkeypatch):
     payload = json.loads(Path(runtime.checkpoint_path).read_text(encoding="utf-8"))
     assert "shock_002" in payload.get("applied_stimuli_ids", [])
 
+
+def test_stimulus_event_uses_risk_tags_and_participant_ids(tmp_path, monkeypatch):
+    runtime = _build_runtime(tmp_path, monkeypatch)
+
+    event = runtime._event_from_stimulus(
+        1,
+        {
+            "stimulus_id": "shock_003",
+            "tick": 1,
+            "title": "Pier Ambush",
+            "summary": "A lethal boarding clash erupts at the pier.",
+            "participants": ["Actor One", "Unknown Raider"],
+            "participant_ids": [1],
+            "priority": 5,
+            "risk_level": 5,
+            "tags": ["battle", "ambush"],
+            "duration_ticks": 1,
+            "state_impacts": {"conflict": 0.2},
+        },
+    )
+
+    assert event.risk_level == 5
+    assert event.tags == ["battle", "ambush"]
+    assert event.participant_ids == [1]
