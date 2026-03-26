@@ -1,6 +1,8 @@
 import asyncio
 import json
+import queue
 import time
+import threading
 from pathlib import Path
 
 from app.config import Config
@@ -521,6 +523,244 @@ def test_runtime_promotes_repeated_participant_into_dynamic_cast_and_checkpoint(
     assert checkpoint["world_state"]["actor_conditions"][str(new_agent["agent_id"])]["status"] == "healthy"
 
 
+def test_actor_memory_packet_is_persisted_and_injected_into_actor_prompt(tmp_path, monkeypatch):
+    config_path = _write_character_runtime_config(tmp_path, simulation_id="sim_actor_memory")
+
+    monkeypatch.setattr(WorldSimulationRuntime, "_build_llm", lambda self, selector=None: None)
+    runtime = WorldSimulationRuntime(config_path=str(config_path), max_rounds=2)
+
+    runtime.active_events["event_001_0001"] = WorldEvent(
+        event_id="event_001_0001",
+        tick=1,
+        title="Harbor Ambush",
+        summary="Captain Two springs a dockside ambush that leaves Captain One reeling.",
+        primary_agent_id=2,
+        primary_agent_name="Captain Two",
+        participants=["Captain One", "Captain Two"],
+        participant_ids=[1, 2],
+        source_intent_ids=["intent_001_0001"],
+        priority=5,
+        risk_level=5,
+        duration_ticks=1,
+        resolves_at_tick=1,
+        status="active",
+        location="Harbor",
+        tags=["battle", "ambush"],
+        state_impacts={"conflict": 0.22, "stability": -0.08},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_apply_condition_updates",
+        lambda event, tick: [
+            {
+                "tick": tick,
+                "event_id": event.event_id,
+                "event_title": event.title,
+                "agent_id": 1,
+                "agent_name": "Captain One",
+                "from_status": "healthy",
+                "to_status": "critical",
+                "summary": "Captain One 在「Harbor Ambush」中重伤，只能惦记着向 Captain Two 讨回这笔血债。",
+            }
+        ],
+    )
+
+    completed = runtime._complete_due_events(1)
+
+    assert len(completed) == 1
+    actor_memory = runtime.actor_memory_state["actors"]["1"]
+    assert actor_memory["episodic_memories"][0]["event_title"] == "Harbor Ambush"
+    assert actor_memory["open_loops"]
+    assert any(
+        item.get("counterpart_name") == "Captain Two"
+        for item in actor_memory["relationship_tensions"]
+    )
+    assert Path(runtime.actor_memory_state_path).exists()
+    assert Path(runtime.actor_memory_updates_path).exists()
+
+    captured_payloads = []
+
+    class FakeLLM:
+        provider_id = "litellm"
+        profile_id = "eval_litellm_gpt54_fast"
+        model = "gpt-5.4"
+        speed_mode = "fast"
+        reasoning_effort = None
+        verbosity = None
+        service_tier = None
+
+        def chat_json_with_meta(self, messages, temperature, max_tokens, timeout):
+            captured_payloads.append(json.loads(messages[1]["content"]))
+            return {
+                "data": {
+                    "objective": "Stalk Captain Two through the harbor alleys",
+                    "summary": "Captain One refuses to drop the ambush debt and starts closing the distance.",
+                    "location": "Harbor",
+                    "target": "Captain Two",
+                    "desired_duration": 1,
+                    "priority": 5,
+                    "urgency": 5,
+                    "risk_level": 4,
+                    "participants": ["Captain One"],
+                    "tags": ["revenge", "ambush"],
+                    "state_impacts": {"conflict": 0.08},
+                    "rationale": "follow unfinished business",
+                },
+                "json_candidate": "{}",
+                "raw_response": "{}",
+            }
+
+    monkeypatch.setattr(runtime, "_get_actor_llm", lambda agent=None: FakeLLM())
+
+    intent = asyncio.run(
+        runtime._generate_single_intent(
+            tick=2,
+            scene_title="Harbor Front",
+            agent=runtime.agent_index[1],
+        )
+    )
+
+    assert intent is not None
+    assert intent.target == "Captain Two"
+    assert captured_payloads
+    assert captured_payloads[0]["actor_memory"]["unfinished_business"]
+    assert captured_payloads[0]["actor_memory"]["relationship_tensions"]
+    assert "Harbor Ambush" in json.dumps(captured_payloads[0]["actor_memory"], ensure_ascii=False)
+
+
+def test_resume_from_checkpoint_restores_actor_memory_state(tmp_path, monkeypatch):
+    config_path = _write_character_runtime_config(tmp_path, simulation_id="sim_actor_memory_resume")
+    world_dir = config_path.parent / "world"
+    memory_dir = world_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    actor_memory_state = {
+        "schema_version": 1,
+        "revision": 3,
+        "recent_updates": [
+            {
+                "tick": 4,
+                "actor_id": 1,
+                "actor_name": "Captain One",
+                "event_id": "event_004_0001",
+                "event_title": "Harbor Ambush",
+                "summary": "Captain One 仍记着 Harbor Ambush 留下的血债。",
+                "reason": "condition_fallout",
+            }
+        ],
+        "actors": {
+            "1": {
+                "agent_id": 1,
+                "entity_name": "Captain One",
+                "entity_type": "Character",
+                "public_role": "",
+                "home_location": "Harbor",
+                "standing_drives": ["Protect the harbor line"],
+                "temperament": [],
+                "episodic_memories": [
+                    {
+                        "memory_id": "mem:event_004_0001:1",
+                        "tick": 4,
+                        "event_id": "event_004_0001",
+                        "event_title": "Harbor Ambush",
+                        "summary": "Captain One remembers being crippled during Harbor Ambush.",
+                        "location": "Harbor",
+                        "tags": ["battle", "ambush"],
+                        "counterpart_names": ["Captain Two"],
+                        "significance": 5,
+                        "valence": "harm",
+                    }
+                ],
+                "open_loops": [
+                    {
+                        "loop_id": "loop:event_004_0001:1",
+                        "summary": "Settle the Harbor Ambush debt with Captain Two.",
+                        "status": "active",
+                        "urgency": 5,
+                        "created_tick": 4,
+                        "last_updated_tick": 4,
+                        "event_id": "event_004_0001",
+                        "event_title": "Harbor Ambush",
+                        "location": "Harbor",
+                        "tags": ["battle", "ambush"],
+                        "counterpart_names": ["Captain Two"],
+                    }
+                ],
+                "relationship_tensions": [
+                    {
+                        "counterpart_id": 2,
+                        "counterpart_name": "Captain Two",
+                        "trust": 0,
+                        "grievance": 4,
+                        "last_updated_tick": 4,
+                        "last_event_title": "Harbor Ambush",
+                        "summary": "Captain One now treats Captain Two as a blood enemy.",
+                    }
+                ],
+                "last_updated_tick": 4,
+            }
+        },
+    }
+    (memory_dir / "actor_memory_state.json").write_text(
+        json.dumps(actor_memory_state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (world_dir / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "saved_at": "2026-03-26T00:00:00",
+                "status": "completed",
+                "terminal_status": "completed",
+                "stop_reason": "target_rounds_reached",
+                "simulation_id": "sim_actor_memory_resume",
+                "config_path": str(config_path),
+                "last_completed_tick": 4,
+                "run_total_rounds": 4,
+                "target_rounds": 4,
+                "minutes_per_round": 60,
+                "active_events": [],
+                "queued_events": [],
+                "completed_events": [],
+                "world_state": {
+                    "tension": 0.78,
+                    "stability": 0.26,
+                    "momentum": 0.71,
+                    "pressure_tracks": {"conflict": 0.82},
+                    "last_tick_summary": "Tick 4 ended with lingering debts.",
+                    "actor_memory_summary": {
+                        "schema_version": 1,
+                        "revision": 3,
+                        "actor_count": 2,
+                    },
+                },
+                "actor_memory_state": actor_memory_state,
+                "last_snapshot": {
+                    "tick": 4,
+                    "summary": "Tick 4 ended with lingering debts.",
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(WorldSimulationRuntime, "_build_llm", lambda self, selector=None: None)
+    monkeypatch.setattr(WorldSimulationRuntime, "_get_actor_llm", lambda self, agent=None: None)
+
+    runtime = WorldSimulationRuntime(
+        config_path=str(config_path),
+        max_rounds=8,
+        resume_from_checkpoint=True,
+    )
+
+    assert runtime.actor_memory_state["actors"]["1"]["episodic_memories"][0]["event_title"] == "Harbor Ambush"
+    assert runtime.actor_memory_state["actors"]["1"]["open_loops"][0]["summary"] == (
+        "Settle the Harbor Ambush debt with Captain Two."
+    )
+    assert runtime.world_state["actor_memory_summary"]["revision"] == 3
+
+
 def test_invalid_json_intent_prefers_structured_recovery(tmp_path, monkeypatch):
     runtime = _build_runtime(tmp_path, monkeypatch)
 
@@ -964,6 +1204,45 @@ def test_world_report_outline_uses_hard_timeout_and_falls_back(monkeypatch):
         "关键角色与势力变化",
         "后续风险与可操作建议",
     ]
+
+
+def test_world_report_outline_uses_hard_timeout_off_main_thread(monkeypatch):
+    class SlowLLM:
+        def chat_json(self, *args, **kwargs):
+            time.sleep(0.2)
+            return {
+                "title": "不该成功",
+                "summary": "不该成功",
+                "sections": [{"title": "不该成功"}],
+            }
+
+    monkeypatch.delenv("WORLD_REPORT_LLM_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(world_report_agent_module, "WORLD_REPORT_LLM_TIMEOUT_SECONDS", 0.05)
+
+    agent = WorldReportAgent(
+        graph_id="graph_timeout_thread",
+        simulation_id="sim_timeout_thread",
+        simulation_requirement="推进这个世界",
+        llm_client=SlowLLM(),
+        enable_llm=True,
+    )
+
+    result_queue: "queue.Queue[tuple[float, str]]" = queue.Queue()
+
+    def _run() -> None:
+        started = time.perf_counter()
+        outline = agent._build_outline({"world_state": {}, "action_types": {}, "top_actors": {}})
+        elapsed = time.perf_counter() - started
+        result_queue.put((elapsed, outline.title))
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout=1.0)
+
+    assert worker.is_alive() is False
+    elapsed, title = result_queue.get_nowait()
+    assert elapsed < 0.3
+    assert title == "世界观自动推进报告"
 
 
 def test_world_report_section_uses_hard_timeout_and_falls_back(monkeypatch):

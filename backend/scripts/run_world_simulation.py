@@ -561,6 +561,309 @@ def summarize_actor_conditions(actor_conditions: Any) -> Dict[str, int]:
     return summary
 
 
+ACTOR_MEMORY_SCHEMA_VERSION = 1
+ACTOR_MEMORY_MAX_EPISODIC = 18
+ACTOR_MEMORY_MAX_OPEN_LOOPS = 8
+ACTOR_MEMORY_MAX_RELATIONSHIPS = 8
+ACTOR_MEMORY_MAX_RECENT_UPDATES = 24
+ACTOR_MEMORY_PACKET_EPISODIC = 3
+ACTOR_MEMORY_PACKET_OPEN_LOOPS = 3
+ACTOR_MEMORY_PACKET_RELATIONSHIPS = 3
+ACTOR_MEMORY_LOOP_TICK_HORIZON = 96
+SUPPORTIVE_EVENT_TOKENS = {
+    "alliance",
+    "escort",
+    "rescue",
+    "protect",
+    "truce",
+    "aid",
+    "护送",
+    "救援",
+    "结盟",
+    "保护",
+    "休战",
+    "停火",
+}
+
+
+def initial_actor_memory_entry(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    agent_id = safe_int(agent.get("agent_id", 0), default=0, lower=0)
+    entity_name = normalize_optional_text(agent.get("entity_name") or agent.get("username"))
+    if agent_id <= 0 or not entity_name:
+        return None
+    standing_drives = clip_list(
+        dedupe_keep_order(
+            [
+                *ensure_list(agent.get("driving_goals")),
+                *ensure_list(agent.get("story_hooks")),
+                *ensure_list(agent.get("constraints")),
+            ]
+        ),
+        140,
+        4,
+    )
+    if not standing_drives:
+        fallback_drive = clip_text(
+            agent.get("public_role") or agent.get("summary") or "protect current leverage",
+            140,
+        )
+        if fallback_drive:
+            standing_drives = [fallback_drive]
+    return {
+        "agent_id": agent_id,
+        "entity_name": entity_name,
+        "entity_type": normalize_optional_text(agent.get("entity_type")) or "Actor",
+        "public_role": clip_text(agent.get("public_role", ""), 180),
+        "home_location": clip_text(agent.get("home_location", ""), 120),
+        "standing_drives": standing_drives,
+        "temperament": clip_list(agent.get("temperament", []), 40, 4),
+        "episodic_memories": [],
+        "open_loops": [],
+        "relationship_tensions": [],
+        "last_updated_tick": 0,
+    }
+
+
+def normalize_actor_memory_episode(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    memory_id = normalize_optional_text(payload.get("memory_id"))
+    summary = clip_text(payload.get("summary", ""), 280)
+    if not memory_id and not summary:
+        return None
+    return {
+        "memory_id": memory_id or clip_text(
+            f"mem:{normalize_optional_text(payload.get('event_id'))}:{safe_int(payload.get('tick', 0), default=0, lower=0)}",
+            80,
+        ),
+        "tick": safe_int(payload.get("tick", 0), default=0, lower=0),
+        "event_id": normalize_optional_text(payload.get("event_id")),
+        "event_title": clip_text(payload.get("event_title", ""), 120),
+        "summary": summary,
+        "location": clip_text(payload.get("location", ""), 120),
+        "tags": clip_list(payload.get("tags", []), 40, 6),
+        "counterpart_names": clip_list(payload.get("counterpart_names", []), 80, 4),
+        "significance": safe_int(payload.get("significance", 3), default=3, lower=1, upper=5),
+        "valence": normalize_optional_text(payload.get("valence")) or "witness",
+    }
+
+
+def normalize_actor_memory_open_loop(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    loop_id = normalize_optional_text(payload.get("loop_id"))
+    summary = clip_text(payload.get("summary", ""), 220)
+    if not loop_id and not summary:
+        return None
+    status = normalize_optional_text(payload.get("status")) or "active"
+    if status not in {"active", "resolved", "expired"}:
+        status = "active"
+    return {
+        "loop_id": loop_id or clip_text(
+            f"loop:{normalize_optional_text(payload.get('event_id'))}:{safe_int(payload.get('created_tick', 0), default=0, lower=0)}",
+            80,
+        ),
+        "summary": summary,
+        "status": status,
+        "urgency": safe_int(payload.get("urgency", 3), default=3, lower=1, upper=5),
+        "created_tick": safe_int(payload.get("created_tick", 0), default=0, lower=0),
+        "last_updated_tick": safe_int(payload.get("last_updated_tick", 0), default=0, lower=0),
+        "event_id": normalize_optional_text(payload.get("event_id")),
+        "event_title": clip_text(payload.get("event_title", ""), 120),
+        "location": clip_text(payload.get("location", ""), 120),
+        "tags": clip_list(payload.get("tags", []), 40, 6),
+        "counterpart_names": clip_list(payload.get("counterpart_names", []), 80, 4),
+    }
+
+
+def normalize_actor_memory_relationship(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    counterpart_name = normalize_optional_text(payload.get("counterpart_name"))
+    counterpart_id = safe_int(payload.get("counterpart_id", 0), default=0, lower=0)
+    if counterpart_id <= 0 and not counterpart_name:
+        return None
+    return {
+        "counterpart_id": counterpart_id,
+        "counterpart_name": counterpart_name,
+        "trust": safe_int(payload.get("trust", 0), default=0, lower=0, upper=5),
+        "grievance": safe_int(payload.get("grievance", 0), default=0, lower=0, upper=5),
+        "last_updated_tick": safe_int(payload.get("last_updated_tick", 0), default=0, lower=0),
+        "last_event_title": clip_text(payload.get("last_event_title", ""), 120),
+        "summary": clip_text(payload.get("summary", ""), 220),
+    }
+
+
+def normalize_actor_memory_update(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    summary = clip_text(payload.get("summary", ""), 220)
+    if not summary:
+        return None
+    return {
+        "tick": safe_int(payload.get("tick", 0), default=0, lower=0),
+        "actor_id": safe_int(payload.get("actor_id", 0), default=0, lower=0),
+        "actor_name": clip_text(payload.get("actor_name", ""), 80),
+        "event_id": normalize_optional_text(payload.get("event_id")),
+        "event_title": clip_text(payload.get("event_title", ""), 120),
+        "summary": summary,
+        "reason": clip_text(payload.get("reason", ""), 80),
+        "revision": safe_int(payload.get("revision", 0), default=0, lower=0),
+    }
+
+
+def normalize_actor_memory_entry(agent: Dict[str, Any], payload: Any) -> Dict[str, Any]:
+    entry = initial_actor_memory_entry(agent)
+    if entry is None:
+        raise ValueError("actor memory requires a valid agent entry")
+    if not isinstance(payload, dict):
+        return entry
+
+    standing_drives = clip_list(
+        dedupe_keep_order(ensure_list(payload.get("standing_drives"))),
+        140,
+        4,
+    )
+    if standing_drives:
+        entry["standing_drives"] = standing_drives
+    temperament = clip_list(payload.get("temperament", []), 40, 4)
+    if temperament:
+        entry["temperament"] = temperament
+    public_role = clip_text(payload.get("public_role", ""), 180)
+    if public_role:
+        entry["public_role"] = public_role
+    home_location = clip_text(payload.get("home_location", ""), 120)
+    if home_location:
+        entry["home_location"] = home_location
+
+    episodic_memories: List[Dict[str, Any]] = []
+    seen_memory_ids: set[str] = set()
+    for item in payload.get("episodic_memories", []) if isinstance(payload.get("episodic_memories"), list) else []:
+        normalized = normalize_actor_memory_episode(item)
+        if not normalized or normalized["memory_id"] in seen_memory_ids:
+            continue
+        seen_memory_ids.add(normalized["memory_id"])
+        episodic_memories.append(normalized)
+    episodic_memories.sort(
+        key=lambda item: (item["significance"], item["tick"], item["memory_id"]),
+        reverse=True,
+    )
+    entry["episodic_memories"] = episodic_memories[:ACTOR_MEMORY_MAX_EPISODIC]
+
+    open_loops: List[Dict[str, Any]] = []
+    seen_loop_ids: set[str] = set()
+    for item in payload.get("open_loops", []) if isinstance(payload.get("open_loops"), list) else []:
+        normalized = normalize_actor_memory_open_loop(item)
+        if not normalized or normalized["loop_id"] in seen_loop_ids:
+            continue
+        seen_loop_ids.add(normalized["loop_id"])
+        open_loops.append(normalized)
+    open_loops.sort(
+        key=lambda item: (item["status"] == "active", item["urgency"], item["last_updated_tick"]),
+        reverse=True,
+    )
+    entry["open_loops"] = open_loops[:ACTOR_MEMORY_MAX_OPEN_LOOPS]
+
+    relationship_tensions: List[Dict[str, Any]] = []
+    seen_rel_keys: set[str] = set()
+    for item in payload.get("relationship_tensions", []) if isinstance(payload.get("relationship_tensions"), list) else []:
+        normalized = normalize_actor_memory_relationship(item)
+        if not normalized:
+            continue
+        rel_key = f"{normalized['counterpart_id']}::{normalized['counterpart_name']}"
+        if rel_key in seen_rel_keys:
+            continue
+        seen_rel_keys.add(rel_key)
+        relationship_tensions.append(normalized)
+    relationship_tensions.sort(
+        key=lambda item: (item["grievance"] + item["trust"], item["last_updated_tick"]),
+        reverse=True,
+    )
+    entry["relationship_tensions"] = relationship_tensions[:ACTOR_MEMORY_MAX_RELATIONSHIPS]
+    entry["last_updated_tick"] = safe_int(payload.get("last_updated_tick", 0), default=0, lower=0)
+    return entry
+
+
+def build_actor_memory_state(
+    agent_configs: Sequence[Dict[str, Any]],
+    payload: Any = None,
+) -> Dict[str, Any]:
+    payload_map = payload if isinstance(payload, dict) else {}
+    actors_payload = payload_map.get("actors") if isinstance(payload_map.get("actors"), dict) else {}
+    actors: Dict[str, Dict[str, Any]] = {}
+    for agent in agent_configs:
+        entry = initial_actor_memory_entry(agent)
+        if entry is None:
+            continue
+        key = str(entry["agent_id"])
+        actors[key] = normalize_actor_memory_entry(agent, actors_payload.get(key))
+
+    recent_updates: List[Dict[str, Any]] = []
+    for item in payload_map.get("recent_updates", []) if isinstance(payload_map.get("recent_updates"), list) else []:
+        normalized = normalize_actor_memory_update(item)
+        if normalized:
+            recent_updates.append(normalized)
+
+    return {
+        "schema_version": ACTOR_MEMORY_SCHEMA_VERSION,
+        "revision": safe_int(payload_map.get("revision", 0), default=0, lower=0),
+        "actors": actors,
+        "recent_updates": recent_updates[-ACTOR_MEMORY_MAX_RECENT_UPDATES:],
+    }
+
+
+def summarize_actor_memory_state(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "schema_version": ACTOR_MEMORY_SCHEMA_VERSION,
+            "revision": 0,
+            "actor_count": 0,
+            "episodic_memory_count": 0,
+            "open_loop_count": 0,
+            "actors_with_open_loops": 0,
+            "relationship_count": 0,
+            "recent_updates": [],
+        }
+    actors = payload.get("actors") if isinstance(payload.get("actors"), dict) else {}
+    recent_updates = payload.get("recent_updates") if isinstance(payload.get("recent_updates"), list) else []
+    open_loop_count = 0
+    actors_with_open_loops = 0
+    episodic_memory_count = 0
+    relationship_count = 0
+    for actor in actors.values():
+        if not isinstance(actor, dict):
+            continue
+        episodic = actor.get("episodic_memories") if isinstance(actor.get("episodic_memories"), list) else []
+        open_loops = actor.get("open_loops") if isinstance(actor.get("open_loops"), list) else []
+        relationships = actor.get("relationship_tensions") if isinstance(actor.get("relationship_tensions"), list) else []
+        episodic_memory_count += len(episodic)
+        relationship_count += len(relationships)
+        active_loops = [
+            item for item in open_loops
+            if isinstance(item, dict) and normalize_optional_text(item.get("status")) == "active"
+        ]
+        open_loop_count += len(active_loops)
+        if active_loops:
+            actors_with_open_loops += 1
+    return {
+        "schema_version": ACTOR_MEMORY_SCHEMA_VERSION,
+        "revision": safe_int(payload.get("revision", 0), default=0, lower=0),
+        "actor_count": len(actors),
+        "episodic_memory_count": episodic_memory_count,
+        "open_loop_count": open_loop_count,
+        "actors_with_open_loops": actors_with_open_loops,
+        "relationship_count": relationship_count,
+        "recent_updates": [
+            item
+            for item in (
+                normalize_actor_memory_update(update)
+                for update in recent_updates
+            )
+            if item
+        ][-6:],
+    }
+
+
 def extract_signal_tokens(value: Any) -> List[str]:
     text = normalize_optional_text(value)
     if not text:
@@ -896,6 +1199,10 @@ class WorldSimulationRuntime:
         self.checkpoint_path = os.path.join(self.world_dir, "checkpoint.json")
         self.stop_request_path = os.path.join(self.world_dir, "stop.request.json")
         self.stimuli_path = os.path.join(self.world_dir, "stimuli.json")
+        self.memory_dir = os.path.join(self.world_dir, "memory")
+        self.actor_memory_updates_path = os.path.join(self.memory_dir, "actor_memory_updates.jsonl")
+        self.actor_memory_state_path = os.path.join(self.memory_dir, "actor_memory_state.json")
+        os.makedirs(self.memory_dir, exist_ok=True)
 
         time_config = self.config.get("time_config", {})
         configured_rounds = safe_int(
@@ -1127,6 +1434,7 @@ class WorldSimulationRuntime:
         self.queued_events: Dict[str, WorldEvent] = {}
         self.completed_events: List[WorldEvent] = []
         self.world_state = self._build_initial_state()
+        self.actor_memory_state = build_actor_memory_state(self.agent_configs)
         self.last_snapshot: Dict[str, Any] = {}
         self.applied_stimuli_ids: set[str] = set()
         self.actor_last_selected_tick: Dict[int, int] = {}
@@ -1150,6 +1458,7 @@ class WorldSimulationRuntime:
             self._load_checkpoint()
         self._sync_actor_conditions_world_state()
         self._sync_runtime_cast_world_state()
+        self._sync_actor_memory_world_state()
 
     def _runtime_bool(self, key: str, default: bool) -> bool:
         value = self.runtime_config.get(key)
@@ -1188,6 +1497,7 @@ class WorldSimulationRuntime:
             "queued_events": [event.to_state_dict() for event in self.queued_events.values()],
             "completed_events": [event.to_state_dict() for event in self.completed_events],
             "world_state": self.world_state,
+            "actor_memory_state": self.actor_memory_state,
             "last_snapshot": self.last_snapshot,
             "applied_stimuli_ids": sorted(self.applied_stimuli_ids),
             "actor_last_selected_tick": self.actor_last_selected_tick,
@@ -1217,6 +1527,7 @@ class WorldSimulationRuntime:
             json.dump(self._checkpoint_payload(status=status), f, ensure_ascii=False, indent=2)
             temp_path = f.name
         os.replace(temp_path, self.checkpoint_path)
+        self._persist_actor_memory_state()
 
     def _load_checkpoint(self) -> None:
         if not os.path.exists(self.checkpoint_path):
@@ -1231,6 +1542,16 @@ class WorldSimulationRuntime:
         if isinstance(checkpoint_world_state, dict):
             base_world_state.update(checkpoint_world_state)
         self.world_state = base_world_state
+        checkpoint_actor_memory = payload.get("actor_memory_state")
+        if checkpoint_actor_memory is None and os.path.exists(self.actor_memory_state_path):
+            try:
+                with open(self.actor_memory_state_path, "r", encoding="utf-8") as f:
+                    loaded_actor_memory = json.load(f)
+                if isinstance(loaded_actor_memory, dict):
+                    checkpoint_actor_memory = loaded_actor_memory
+            except Exception:
+                checkpoint_actor_memory = None
+        self.actor_memory_state = build_actor_memory_state(self.agent_configs, checkpoint_actor_memory)
 
         self.active_events = {}
         for event_payload in payload.get("active_events", []):
@@ -1292,11 +1613,13 @@ class WorldSimulationRuntime:
     def _truncate_logs_to_checkpoint(self) -> None:
         self._truncate_actions_log()
         self._truncate_snapshots_log()
+        self._truncate_actor_memory_updates_log()
         if self.last_snapshot:
             with open(self.world_state_path, "w", encoding="utf-8") as f:
                 json.dump(self.last_snapshot, f, ensure_ascii=False, indent=2)
         elif os.path.exists(self.world_state_path):
             os.remove(self.world_state_path)
+        self._persist_actor_memory_state()
 
     def _truncate_actions_log(self) -> None:
         if not os.path.exists(self.actions_log):
@@ -1358,6 +1681,29 @@ class WorldSimulationRuntime:
                     kept_lines.append(json.dumps(payload, ensure_ascii=False) + "\n")
 
         with open(self.snapshots_log, "w", encoding="utf-8") as f:
+            f.writelines(kept_lines)
+
+    def _truncate_actor_memory_updates_log(self) -> None:
+        if not os.path.exists(self.actor_memory_updates_path):
+            return
+
+        kept_lines: List[str] = []
+        with open(self.actor_memory_updates_path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    payload = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                tick = _jsonl_row_tick(payload)
+                if tick is None or tick <= 0:
+                    continue
+                if tick <= self.last_completed_tick:
+                    kept_lines.append(json.dumps(payload, ensure_ascii=False) + "\n")
+
+        with open(self.actor_memory_updates_path, "w", encoding="utf-8") as f:
             f.writelines(kept_lines)
 
     def _stimulus_id(self, stimulus: Dict[str, Any]) -> str:
@@ -1776,6 +2122,8 @@ class WorldSimulationRuntime:
             safe_int(agent.get("agent_id", 0), default=0, lower=0): self._actor_static_score(agent)
             for agent in self.agent_configs
         }
+        if hasattr(self, "actor_memory_state"):
+            self._sync_actor_memory_agents()
 
     def _load_dynamic_agents_from_world_state(self, world_state: Any) -> None:
         self.dynamic_agent_configs = dynamic_agents_from_world_state(world_state)
@@ -1820,6 +2168,50 @@ class WorldSimulationRuntime:
             }
         )
         self.world_state["runtime_cast"] = runtime_cast
+
+    def _sync_actor_memory_agents(self) -> None:
+        actors = self.actor_memory_state.get("actors") if isinstance(self.actor_memory_state, dict) else None
+        if not isinstance(actors, dict):
+            self.actor_memory_state = build_actor_memory_state(self.agent_configs)
+            actors = self.actor_memory_state["actors"]
+        for agent in self.agent_configs:
+            initial_entry = initial_actor_memory_entry(agent)
+            if initial_entry is None:
+                continue
+            key = str(initial_entry["agent_id"])
+            actors[key] = normalize_actor_memory_entry(agent, actors.get(key))
+
+    def _actor_memory_actor_entry(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        actors = self.actor_memory_state.get("actors") if isinstance(self.actor_memory_state, dict) else {}
+        if not isinstance(actors, dict):
+            return None
+        entry = actors.get(str(agent_id))
+        return entry if isinstance(entry, dict) else None
+
+    def _recent_actor_memory_updates(self, limit: int = 6) -> List[Dict[str, Any]]:
+        if not isinstance(self.actor_memory_state, dict):
+            return []
+        updates = self.actor_memory_state.get("recent_updates")
+        if not isinstance(updates, list):
+            return []
+        return [
+            item
+            for item in (
+                normalize_actor_memory_update(update)
+                for update in updates
+            )
+            if item
+        ][-limit:]
+
+    def _sync_actor_memory_world_state(self) -> None:
+        self._sync_actor_memory_agents()
+        summary = summarize_actor_memory_state(self.actor_memory_state)
+        self.world_state["actor_memory_summary"] = summary
+
+    def _persist_actor_memory_state(self) -> None:
+        os.makedirs(self.memory_dir, exist_ok=True)
+        with open(self.actor_memory_state_path, "w", encoding="utf-8") as f:
+            json.dump(self.actor_memory_state, f, ensure_ascii=False, indent=2)
 
     def _sync_actor_conditions_world_state(self) -> None:
         recent_updates = self.world_state.get("recent_condition_updates")
@@ -1887,6 +2279,490 @@ class WorldSimulationRuntime:
         if not isinstance(updates, list):
             return []
         return [item for item in updates if isinstance(item, dict)][-limit:]
+
+    def _memory_actor_ids(self, event: WorldEvent) -> List[int]:
+        actor_ids: List[int] = []
+        for raw_value in [event.primary_agent_id, *event.participant_ids]:
+            actor_id = safe_int(raw_value, default=0, lower=0)
+            if actor_id > 0 and actor_id not in actor_ids:
+                actor_ids.append(actor_id)
+        return actor_ids
+
+    def _is_supportive_event(self, event: WorldEvent) -> bool:
+        joined = " ".join([event.title, event.summary, *event.tags]).lower()
+        if any(token.lower() in joined for token in SUPPORTIVE_EVENT_TOKENS):
+            return True
+        return safe_float(event.state_impacts.get("stability", 0.0), 0.0) > 0.05
+
+    def _memory_event_significance(
+        self,
+        event: WorldEvent,
+        actor_id: int,
+        condition_update: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        score = 1
+        score += int(event.priority >= 4)
+        score += int(event.risk_level >= 4)
+        score += int(actor_id == event.primary_agent_id and event.priority >= 4)
+        if condition_update:
+            score += 2
+        return max(1, min(score, 5))
+
+    def _personalized_memory_summary(
+        self,
+        actor_name: str,
+        event: WorldEvent,
+        condition_update: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if condition_update and normalize_optional_text(condition_update.get("summary")):
+            return clip_text(condition_update.get("summary"), 280)
+        if actor_name == event.primary_agent_name:
+            return clip_text(f"{actor_name} 在「{event.title}」中主动推进了局势：{event.summary}", 280)
+        return clip_text(f"{actor_name} 被卷入「{event.title}」：{event.summary}", 280)
+
+    def _open_loop_summary(
+        self,
+        actor_name: str,
+        event: WorldEvent,
+        condition_update: Optional[Dict[str, Any]],
+        counterpart_names: List[str],
+    ) -> str:
+        if condition_update:
+            to_status = normalize_optional_text(condition_update.get("to_status"))
+            if counterpart_names:
+                if to_status in {"critical", "incapacitated", "dead"}:
+                    return clip_text(
+                        f"向 {' / '.join(counterpart_names[:2])} 讨回「{event.title}」留下的代价。",
+                        220,
+                    )
+            return clip_text(f"处理「{event.title}」留下的伤势和后果。", 220)
+        if actor_name == event.primary_agent_name and event.priority >= 4:
+            return clip_text(f"继续推进「{event.title}」的后续动作。", 220)
+        return clip_text(f"应对「{event.title}」带来的余波。", 220)
+
+    def _relationship_summary(self, relationship: Dict[str, Any]) -> str:
+        counterpart_name = relationship.get("counterpart_name") or "Unknown"
+        grievance = safe_int(relationship.get("grievance", 0), default=0, lower=0, upper=5)
+        trust = safe_int(relationship.get("trust", 0), default=0, lower=0, upper=5)
+        last_event_title = normalize_optional_text(relationship.get("last_event_title"))
+        if grievance >= 4:
+            return clip_text(
+                f"对 {counterpart_name} 保持强烈怨恨，最近一次触发点是「{last_event_title}」。",
+                220,
+            )
+        if trust >= 4:
+            return clip_text(
+                f"把 {counterpart_name} 当成可靠同盟，最近一次确认发生在「{last_event_title}」。",
+                220,
+            )
+        if grievance > trust:
+            return clip_text(
+                f"对 {counterpart_name} 保持戒备，裂痕来自「{last_event_title}」。",
+                220,
+            )
+        if trust > grievance:
+            return clip_text(
+                f"对 {counterpart_name} 仍有合作倾向，最近一次加深发生在「{last_event_title}」。",
+                220,
+            )
+        return clip_text(
+            f"与 {counterpart_name} 的关系尚未定型，最近一次被「{last_event_title}」触动。",
+            220,
+        )
+
+    def _upsert_actor_open_loop(self, actor_entry: Dict[str, Any], payload: Dict[str, Any]) -> None:
+        normalized = normalize_actor_memory_open_loop(payload)
+        if normalized is None:
+            return
+        open_loops = actor_entry.get("open_loops") if isinstance(actor_entry.get("open_loops"), list) else []
+        updated: List[Dict[str, Any]] = []
+        merged = False
+        for item in open_loops:
+            existing = normalize_actor_memory_open_loop(item)
+            if existing is None:
+                continue
+            if existing["loop_id"] == normalized["loop_id"] or (
+                existing["event_id"] and existing["event_id"] == normalized["event_id"]
+            ):
+                merged_item = dict(existing)
+                merged_item.update(normalized)
+                merged_item["urgency"] = max(existing["urgency"], normalized["urgency"])
+                merged_item["status"] = normalized["status"]
+                updated.append(merged_item)
+                merged = True
+            else:
+                updated.append(existing)
+        if not merged:
+            updated.insert(0, normalized)
+        updated = [
+            item for item in updated
+            if normalize_optional_text(item.get("status")) == "active"
+            and max(self.last_completed_tick - safe_int(item.get("last_updated_tick", 0), default=0, lower=0), 0)
+            <= ACTOR_MEMORY_LOOP_TICK_HORIZON
+        ] + [
+            item for item in updated
+            if normalize_optional_text(item.get("status")) != "active"
+        ]
+        updated.sort(
+            key=lambda item: (
+                normalize_optional_text(item.get("status")) == "active",
+                safe_int(item.get("urgency", 0), default=0, lower=0),
+                safe_int(item.get("last_updated_tick", 0), default=0, lower=0),
+            ),
+            reverse=True,
+        )
+        actor_entry["open_loops"] = updated[:ACTOR_MEMORY_MAX_OPEN_LOOPS]
+
+    def _update_actor_relationships(
+        self,
+        actor_entry: Dict[str, Any],
+        actor_id: int,
+        event: WorldEvent,
+        counterpart_ids: List[int],
+        condition_update: Optional[Dict[str, Any]],
+        supportive: bool,
+        tick: int,
+    ) -> None:
+        relationships = actor_entry.get("relationship_tensions") if isinstance(actor_entry.get("relationship_tensions"), list) else []
+        by_key: Dict[str, Dict[str, Any]] = {}
+        for item in relationships:
+            normalized = normalize_actor_memory_relationship(item)
+            if normalized is None:
+                continue
+            rel_key = f"{normalized['counterpart_id']}::{normalized['counterpart_name']}"
+            by_key[rel_key] = normalized
+
+        for counterpart_id in counterpart_ids:
+            if counterpart_id == actor_id:
+                continue
+            counterpart = self.agent_index.get(counterpart_id)
+            counterpart_name = self._agent_name(counterpart) if counterpart else f"Actor {counterpart_id}"
+            rel_key = f"{counterpart_id}::{counterpart_name}"
+            current = by_key.get(
+                rel_key,
+                {
+                    "counterpart_id": counterpart_id,
+                    "counterpart_name": counterpart_name,
+                    "trust": 0,
+                    "grievance": 0,
+                    "last_updated_tick": 0,
+                    "last_event_title": "",
+                    "summary": "",
+                },
+            )
+            if supportive:
+                current["trust"] = min(current["trust"] + 1, 5)
+                current["grievance"] = max(current["grievance"] - 1, 0)
+            elif condition_update:
+                grievance_bump = 2 if counterpart_id == event.primary_agent_id else 1
+                current["grievance"] = min(current["grievance"] + grievance_bump, 5)
+                current["trust"] = max(current["trust"] - 1, 0)
+            current["last_updated_tick"] = tick
+            current["last_event_title"] = event.title
+            current["summary"] = self._relationship_summary(current)
+            by_key[rel_key] = current
+
+        updated = list(by_key.values())
+        updated.sort(
+            key=lambda item: (
+                safe_int(item.get("grievance", 0), default=0, lower=0)
+                + safe_int(item.get("trust", 0), default=0, lower=0),
+                safe_int(item.get("last_updated_tick", 0), default=0, lower=0),
+            ),
+            reverse=True,
+        )
+        actor_entry["relationship_tensions"] = updated[:ACTOR_MEMORY_MAX_RELATIONSHIPS]
+
+    def _record_actor_memory_update(
+        self,
+        *,
+        tick: int,
+        actor_id: int,
+        actor_name: str,
+        event: WorldEvent,
+        summary: str,
+        reason: str,
+        actor_entry: Dict[str, Any],
+    ) -> None:
+        revision = safe_int(self.actor_memory_state.get("revision", 0), default=0, lower=0) + 1
+        self.actor_memory_state["revision"] = revision
+        update_payload = {
+            "tick": tick,
+            "timestamp": now_iso(),
+            "revision": revision,
+            "actor_id": actor_id,
+            "actor_name": actor_name,
+            "event_id": event.event_id,
+            "event_title": event.title,
+            "summary": clip_text(summary, 220),
+            "reason": clip_text(reason, 80),
+            "actor_memory": actor_entry,
+        }
+        recent_updates = self.actor_memory_state.get("recent_updates")
+        if not isinstance(recent_updates, list):
+            recent_updates = []
+        recent_updates.append(normalize_actor_memory_update(update_payload))
+        self.actor_memory_state["recent_updates"] = [
+            item for item in recent_updates if item
+        ][-ACTOR_MEMORY_MAX_RECENT_UPDATES:]
+        self._append_jsonl(self.actor_memory_updates_path, update_payload)
+
+    def _apply_actor_memory_updates(self, event: WorldEvent, tick: int) -> None:
+        self._sync_actor_memory_agents()
+        supportive = self._is_supportive_event(event)
+        event_actor_ids = self._memory_actor_ids(event)
+        condition_updates = {
+            safe_int(item.get("agent_id", 0), default=0, lower=0): item
+            for item in event.condition_updates
+            if isinstance(item, dict)
+        }
+        for actor_id in event_actor_ids:
+            agent = self.agent_index.get(actor_id)
+            actor_entry = self._actor_memory_actor_entry(actor_id)
+            if agent is None or actor_entry is None:
+                continue
+            actor_name = self._agent_name(agent)
+            condition_update = condition_updates.get(actor_id)
+            significance = self._memory_event_significance(event, actor_id, condition_update)
+            counterpart_ids = [item for item in event_actor_ids if item != actor_id]
+            counterpart_names = [
+                self._agent_name(self.agent_index[item])
+                for item in counterpart_ids
+                if item in self.agent_index
+            ][:4]
+            summary = self._personalized_memory_summary(actor_name, event, condition_update)
+            memory_item = normalize_actor_memory_episode(
+                {
+                    "memory_id": f"mem:{event.event_id}:{actor_id}",
+                    "tick": tick,
+                    "event_id": event.event_id,
+                    "event_title": event.title,
+                    "summary": summary,
+                    "location": event.location,
+                    "tags": event.tags[:6],
+                    "counterpart_names": counterpart_names,
+                    "significance": significance,
+                    "valence": (
+                        "harm"
+                        if condition_update
+                        else "support"
+                        if supportive
+                        else "turning_point"
+                        if actor_id == event.primary_agent_id and significance >= 4
+                        else "witness"
+                    ),
+                }
+            )
+            episodic_memories = actor_entry.get("episodic_memories") if isinstance(actor_entry.get("episodic_memories"), list) else []
+            episodic_memories = [
+                item for item in episodic_memories
+                if normalize_optional_text(item.get("memory_id")) != memory_item["memory_id"]
+            ]
+            episodic_memories.insert(0, memory_item)
+            episodic_memories = [
+                item
+                for item in (
+                    normalize_actor_memory_episode(memory)
+                    for memory in episodic_memories
+                )
+                if item
+            ]
+            episodic_memories.sort(
+                key=lambda item: (item["significance"], item["tick"], item["memory_id"]),
+                reverse=True,
+            )
+            actor_entry["episodic_memories"] = episodic_memories[:ACTOR_MEMORY_MAX_EPISODIC]
+
+            if significance >= 4 or condition_update:
+                self._upsert_actor_open_loop(
+                    actor_entry,
+                    {
+                        "loop_id": f"loop:{event.event_id}:{actor_id}",
+                        "summary": self._open_loop_summary(actor_name, event, condition_update, counterpart_names),
+                        "status": "active",
+                        "urgency": significance,
+                        "created_tick": tick,
+                        "last_updated_tick": tick,
+                        "event_id": event.event_id,
+                        "event_title": event.title,
+                        "location": event.location,
+                        "tags": event.tags[:6],
+                        "counterpart_names": counterpart_names,
+                    },
+                )
+
+            self._update_actor_relationships(
+                actor_entry,
+                actor_id=actor_id,
+                event=event,
+                counterpart_ids=counterpart_ids,
+                condition_update=condition_update,
+                supportive=supportive,
+                tick=tick,
+            )
+            actor_entry["last_updated_tick"] = tick
+            self._record_actor_memory_update(
+                tick=tick,
+                actor_id=actor_id,
+                actor_name=actor_name,
+                event=event,
+                summary=summary,
+                reason="condition_fallout" if condition_update else "event_memory",
+                actor_entry=actor_entry,
+            )
+
+        self._sync_actor_memory_world_state()
+        self._persist_actor_memory_state()
+
+    def _actor_memory_focus_context(self, agent: Dict[str, Any], scene_title: str) -> Dict[str, Any]:
+        events = [
+            *list(self.active_events.values())[:6],
+            *list(self.queued_events.values())[:4],
+            *self.completed_events[-4:],
+        ]
+        focus_tokens = extract_signal_tokens(scene_title)
+        focus_tags: set[str] = set()
+        focus_locations: set[str] = set()
+        focus_names: set[str] = set()
+        for event in events:
+            focus_tokens.extend(extract_signal_tokens(event.title))
+            focus_tokens.extend(extract_signal_tokens(event.summary))
+            focus_tags.update(normalize_optional_text(tag).lower() for tag in event.tags if normalize_optional_text(tag))
+            location = normalize_optional_text(event.location)
+            if location:
+                focus_locations.add(location)
+            for participant in event.participants:
+                participant_name = normalize_optional_text(participant)
+                if participant_name:
+                    focus_names.add(participant_name)
+        for item in ensure_list(agent.get("connected_entities")):
+            if normalize_optional_text(item):
+                focus_names.add(normalize_optional_text(item))
+        focus_names.discard(self._agent_name(agent))
+        return {
+            "tokens": set(dedupe_keep_order(focus_tokens)),
+            "tags": focus_tags,
+            "locations": focus_locations,
+            "names": focus_names,
+        }
+
+    def _actor_memory_packet(self, agent: Dict[str, Any], tick: int, scene_title: str) -> Dict[str, Any]:
+        actor_entry = self._actor_memory_actor_entry(self._agent_id(agent))
+        if actor_entry is None:
+            return {
+                "standing_drives": [],
+                "unfinished_business": [],
+                "relationship_tensions": [],
+                "recalled_memories": [],
+            }
+
+        focus = self._actor_memory_focus_context(agent, scene_title)
+
+        def score_episode(item: Dict[str, Any]) -> float:
+            score = float(item.get("significance", 0)) * 4.0
+            age = max(tick - safe_int(item.get("tick", 0), default=0, lower=0), 0)
+            score -= min(age / 8.0, 6.0)
+            score += 5.0 * sum(
+                1 for name in item.get("counterpart_names", [])
+                if normalize_optional_text(name) in focus["names"]
+            )
+            if normalize_optional_text(item.get("location")) in focus["locations"]:
+                score += 3.0
+            score += 2.0 * len(
+                set(normalize_optional_text(tag).lower() for tag in item.get("tags", []))
+                & focus["tags"]
+            )
+            text_tokens = set(extract_signal_tokens(f"{item.get('event_title', '')}\n{item.get('summary', '')}"))
+            score += 1.5 * min(len(text_tokens & focus["tokens"]), 3)
+            return score
+
+        def score_loop(item: Dict[str, Any]) -> float:
+            if normalize_optional_text(item.get("status")) != "active":
+                return -1.0
+            score = float(item.get("urgency", 0)) * 4.0
+            age = max(tick - safe_int(item.get("last_updated_tick", 0), default=0, lower=0), 0)
+            score -= min(age / 10.0, 5.0)
+            score += 4.0 * sum(
+                1 for name in item.get("counterpart_names", [])
+                if normalize_optional_text(name) in focus["names"]
+            )
+            if normalize_optional_text(item.get("location")) in focus["locations"]:
+                score += 2.0
+            score += 1.5 * len(
+                set(normalize_optional_text(tag).lower() for tag in item.get("tags", []))
+                & focus["tags"]
+            )
+            return score
+
+        def score_relationship(item: Dict[str, Any]) -> float:
+            score = float(item.get("grievance", 0)) * 3.0 + float(item.get("trust", 0)) * 2.0
+            age = max(tick - safe_int(item.get("last_updated_tick", 0), default=0, lower=0), 0)
+            score -= min(age / 12.0, 4.0)
+            if normalize_optional_text(item.get("counterpart_name")) in focus["names"]:
+                score += 4.0
+            title_tokens = set(extract_signal_tokens(item.get("last_event_title", "")))
+            score += 1.5 * min(len(title_tokens & focus["tokens"]), 2)
+            return score
+
+        episodic_memories = [
+            item
+            for item in (
+                normalize_actor_memory_episode(memory)
+                for memory in actor_entry.get("episodic_memories", [])
+            )
+            if item
+        ]
+        open_loops = [
+            item
+            for item in (
+                normalize_actor_memory_open_loop(loop)
+                for loop in actor_entry.get("open_loops", [])
+            )
+            if item
+        ]
+        relationship_tensions = [
+            item
+            for item in (
+                normalize_actor_memory_relationship(relationship)
+                for relationship in actor_entry.get("relationship_tensions", [])
+            )
+            if item
+        ]
+
+        top_loops = sorted(open_loops, key=score_loop, reverse=True)[:ACTOR_MEMORY_PACKET_OPEN_LOOPS]
+        top_relationships = sorted(relationship_tensions, key=score_relationship, reverse=True)[
+            :ACTOR_MEMORY_PACKET_RELATIONSHIPS
+        ]
+        top_memories = sorted(episodic_memories, key=score_episode, reverse=True)[:ACTOR_MEMORY_PACKET_EPISODIC]
+
+        return {
+            "standing_drives": actor_entry.get("standing_drives", [])[:3],
+            "unfinished_business": [
+                {
+                    "summary": item.get("summary"),
+                    "urgency": item.get("urgency"),
+                    "last_event_title": item.get("event_title"),
+                }
+                for item in top_loops
+            ],
+            "relationship_tensions": [
+                {
+                    "counterpart_name": item.get("counterpart_name"),
+                    "trust": item.get("trust"),
+                    "grievance": item.get("grievance"),
+                    "summary": item.get("summary"),
+                }
+                for item in top_relationships
+            ],
+            "recalled_memories": [
+                {
+                    "event_title": item.get("event_title"),
+                    "summary": item.get("summary"),
+                    "significance": item.get("significance"),
+                }
+                for item in top_memories
+            ],
+        }
 
     def _agent_affiliations(self, agent: Optional[Dict[str, Any]]) -> List[str]:
         if not isinstance(agent, dict):
@@ -2118,6 +2994,9 @@ class WorldSimulationRuntime:
         if initial_entry is not None:
             actor_conditions[str(initial_entry["agent_id"])] = initial_entry
         self.world_state["actor_condition_summary"] = summarize_actor_conditions(actor_conditions)
+        self._sync_actor_memory_agents()
+        self._sync_actor_memory_world_state()
+        self._persist_actor_memory_state()
 
         runtime_cast = self._runtime_cast_state()
         history = runtime_cast.get("promotion_history")
@@ -2833,6 +3712,9 @@ class WorldSimulationRuntime:
         for path in (self.actions_log, self.snapshots_log, self.world_state_path, self.checkpoint_path):
             if os.path.exists(path):
                 os.remove(path)
+        if os.path.exists(self.memory_dir):
+            shutil.rmtree(self.memory_dir)
+        os.makedirs(self.memory_dir, exist_ok=True)
 
     def _scene_title(self, tick: int) -> str:
         thread = self.plot_threads[(tick - 1) % len(self.plot_threads)] if self.plot_threads else None
@@ -3069,6 +3951,7 @@ class WorldSimulationRuntime:
         return (
             "你是一个世界观自动推进系统中的角色意图生成器。"
             "你的任务不是分析局势，而是替该角色给出本 tick 会执行的一个具体下一步动作。"
+            "actor_memory 是该角色持续保留的私人记忆，不等于世界公报；若 unfinished_business 或 relationship_tensions 提供了明确牵引，优先延续它们。"
             "角色若已受伤、濒危、失能或死亡，必须忠于该状态；高风险暴力行动会带来持续性的伤亡后果。"
             "必须输出一个 JSON 对象，字段只允许包含："
             "objective, summary, location, target, desired_duration, priority, urgency, "
@@ -3121,6 +4004,7 @@ class WorldSimulationRuntime:
         queued_brief = [self._event_brief(event) for event in list(self.queued_events.values())[:6]]
         completed_brief = [self._event_brief(event) for event in self.completed_events[-4:]]
         agent_name = agent.get("entity_name") or agent.get("username") or "Unknown Actor"
+        actor_memory_packet = self._actor_memory_packet(agent, tick, scene_title)
         prompt_payload = {
             "tick": tick,
             "scene_title": scene_title,
@@ -3145,6 +4029,7 @@ class WorldSimulationRuntime:
                 "summary": clip_text(agent.get("summary", ""), 180),
                 "condition": self._actor_prompt_condition(agent),
             },
+            "actor_memory": actor_memory_packet,
             "output_contract": {
                 "must_choose_one_concrete_action": True,
                 "forbid_meta_text": True,
@@ -4101,8 +4986,11 @@ class WorldSimulationRuntime:
     def _heuristic_intent(self, tick: int, scene_title: str, agent: Dict[str, Any]) -> ActorIntent:
         agent_id = safe_int(agent.get("agent_id", 0), default=0, lower=0)
         agent_name = str(agent.get("entity_name") or agent.get("username") or f"Actor {agent_id}")
+        actor_memory_packet = self._actor_memory_packet(agent, tick, scene_title)
         raw_goal_pool = (
-            ensure_list(agent.get("driving_goals"))
+            [item.get("summary", "") for item in actor_memory_packet.get("unfinished_business", [])]
+            + [item.get("summary", "") for item in actor_memory_packet.get("recalled_memories", [])]
+            + ensure_list(agent.get("driving_goals"))
             + ensure_list(agent.get("story_hooks"))
             + ensure_list(agent.get("resources"))
             + ensure_list(agent.get("constraints"))
@@ -4143,7 +5031,13 @@ class WorldSimulationRuntime:
         resources = ensure_list(agent.get("resources"))
         links = [
             normalize_optional_text(link)
-            for link in ensure_list(agent.get("connected_entities"))
+            for link in [
+                *[
+                    item.get("counterpart_name", "")
+                    for item in actor_memory_packet.get("relationship_tensions", [])
+                ],
+                *ensure_list(agent.get("connected_entities")),
+            ]
             if not self._is_placeholder_text(link, scene_title=scene_title)
         ]
         objective = self._clean_intent_candidate(self.rng.choice(goals), agent_name=agent_name) or self.rng.choice(goals)
@@ -6465,6 +7359,7 @@ class WorldSimulationRuntime:
             completed.append(event)
             self._apply_event_impacts(event)
             event.condition_updates = self._apply_condition_updates(event, tick)
+            self._apply_actor_memory_updates(event, tick)
             self._write_action(event.complete_log(tick, len(self.active_events), len(self.queued_events)))
 
         return completed
@@ -6540,6 +7435,7 @@ class WorldSimulationRuntime:
                 "actor_conditions": self.world_state.get("actor_conditions", {}),
                 "actor_condition_summary": self.world_state.get("actor_condition_summary", {}),
                 "recent_condition_updates": self._recent_condition_updates(limit=12),
+                "actor_memory_summary": self.world_state.get("actor_memory_summary", {}),
                 "runtime_cast": self.world_state.get("runtime_cast", {}),
                 "last_tick_summary": summary,
             },
@@ -6610,6 +7506,7 @@ class WorldSimulationRuntime:
         self._append_jsonl(self.snapshots_log, snapshot)
         with open(self.world_state_path, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        self._persist_actor_memory_state()
 
     def _write_meta_event(self, payload: Dict[str, Any]) -> None:
         self._append_jsonl(self.actions_log, payload)
@@ -6808,6 +7705,7 @@ class WorldSimulationRuntime:
             "pressure_tracks": self.world_state.get("pressure_tracks", {}),
             "actor_condition_summary": self.world_state.get("actor_condition_summary", {}),
             "recent_condition_updates": self._recent_condition_updates(limit=4),
+            "actor_memory_summary": self.world_state.get("actor_memory_summary", {}),
             "runtime_cast": runtime_cast_brief,
             "last_tick_summary": self.world_state.get("last_tick_summary", ""),
         }
@@ -6865,6 +7763,50 @@ def _normalize_event_state_list(items: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _rebuild_actor_memory_state_from_rows(
+    agent_configs: Sequence[Dict[str, Any]],
+    rows: Sequence[Dict[str, Any]],
+    *,
+    target_tick: int,
+) -> Dict[str, Any]:
+    state = build_actor_memory_state(agent_configs)
+    agent_lookup = {
+        safe_int(agent.get("agent_id", 0), default=0, lower=0): agent
+        for agent in agent_configs
+        if safe_int(agent.get("agent_id", 0), default=0, lower=0) > 0
+    }
+    recent_updates: List[Dict[str, Any]] = []
+    for row in rows:
+        row_tick = safe_int(row.get("tick", row.get("round", 0)), default=0, lower=0)
+        if row_tick <= 0 or row_tick > target_tick:
+            continue
+        actor_id = safe_int(row.get("actor_id", 0), default=0, lower=0)
+        if actor_id <= 0:
+            continue
+        actor_memory = row.get("actor_memory") if isinstance(row.get("actor_memory"), dict) else {}
+        agent = agent_lookup.get(actor_id)
+        if agent is None and isinstance(actor_memory, dict):
+            agent = {
+                "agent_id": actor_id,
+                "entity_name": actor_memory.get("entity_name") or row.get("actor_name") or f"Actor {actor_id}",
+                "entity_type": actor_memory.get("entity_type") or "Actor",
+                "public_role": actor_memory.get("public_role", ""),
+                "home_location": actor_memory.get("home_location", ""),
+                "driving_goals": actor_memory.get("standing_drives", []),
+                "temperament": actor_memory.get("temperament", []),
+            }
+            agent_lookup[actor_id] = agent
+        if agent is None:
+            continue
+        state["actors"][str(actor_id)] = normalize_actor_memory_entry(agent, actor_memory)
+        normalized_update = normalize_actor_memory_update(row)
+        if normalized_update:
+            recent_updates.append(normalized_update)
+            state["revision"] = max(state["revision"], normalized_update["revision"])
+    state["recent_updates"] = recent_updates[-ACTOR_MEMORY_MAX_RECENT_UPDATES:]
+    return state
+
+
 def _event_actor_ids(event_payload: Dict[str, Any]) -> List[int]:
     raw_ids = [
         event_payload.get("primary_agent_id"),
@@ -6896,6 +7838,9 @@ def restore_world_checkpoint_from_logs(
     snapshots_path = os.path.join(paths.world_dir, "state_snapshots.jsonl")
     actions_path = os.path.join(paths.world_dir, "actions.jsonl")
     checkpoint_path = os.path.join(paths.world_dir, "checkpoint.json")
+    memory_dir = os.path.join(paths.world_dir, "memory")
+    actor_memory_updates_path = os.path.join(memory_dir, "actor_memory_updates.jsonl")
+    actor_memory_state_path = os.path.join(memory_dir, "actor_memory_state.json")
 
     snapshots = _load_jsonl_rows(snapshots_path)
     target_snapshot = next(
@@ -7012,6 +7957,12 @@ def restore_world_checkpoint_from_logs(
         *(config.get("agent_configs") or []),
         *dynamic_agents_from_world_state(snapshot_world_state),
     ]
+    actor_memory_rows = _load_jsonl_rows(actor_memory_updates_path)
+    actor_memory_state = _rebuild_actor_memory_state_from_rows(
+        resolved_agent_configs,
+        actor_memory_rows,
+        target_tick=target_tick,
+    )
     base_world_state = build_initial_world_state(
         plot_threads=config.get("plot_threads", []),
         pressure_tracks=config.get("pressure_tracks", []),
@@ -7034,6 +7985,7 @@ def restore_world_checkpoint_from_logs(
         ][-24:]
     else:
         base_world_state["recent_condition_updates"] = []
+    base_world_state["actor_memory_summary"] = summarize_actor_memory_state(actor_memory_state)
     base_world_state["active_event_ids"] = [item["event_id"] for item in normalized_active_events]
     base_world_state["queued_event_ids"] = [item["event_id"] for item in normalized_queued_events]
     base_world_state["completed_event_ids"] = [
@@ -7063,6 +8015,7 @@ def restore_world_checkpoint_from_logs(
         "completed_events": normalized_completed_events,
         "applied_stimuli_ids": sorted(applied_stimuli_ids),
         "world_state": base_world_state,
+        "actor_memory_state": actor_memory_state,
         "last_snapshot": restored_snapshot,
         "actor_last_selected_tick": actor_last_selected_tick,
         "actor_last_event_tick": actor_last_event_tick,
@@ -7085,6 +8038,9 @@ def restore_world_checkpoint_from_logs(
         os.makedirs(os.path.dirname(destination_path), exist_ok=True)
         with open(destination_path, "w", encoding="utf-8") as f:
             json.dump(checkpoint_payload, f, ensure_ascii=False, indent=2)
+        os.makedirs(memory_dir, exist_ok=True)
+        with open(actor_memory_state_path, "w", encoding="utf-8") as f:
+            json.dump(actor_memory_state, f, ensure_ascii=False, indent=2)
 
     return {
         "simulation_id": config.get("simulation_id"),
@@ -7188,6 +8144,34 @@ def _truncate_snapshots_log_to_tick(source_path: str, destination_path: str, tar
     return {"kept": kept, "dropped": dropped}
 
 
+def _truncate_actor_memory_updates_log_to_tick(source_path: str, destination_path: str, target_tick: int) -> Dict[str, int]:
+    kept = 0
+    dropped = 0
+    if not os.path.exists(source_path):
+        return {"kept": 0, "dropped": 0}
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    with open(source_path, "r", encoding="utf-8", errors="ignore") as src, open(
+        destination_path, "w", encoding="utf-8"
+    ) as dst:
+        for raw_line in src:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            tick = _jsonl_row_tick(payload)
+            if tick is None or tick <= 0 or tick > target_tick:
+                dropped += 1
+                continue
+            dst.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            kept += 1
+    return {"kept": kept, "dropped": dropped}
+
+
 def fork_world_simulation_from_logs(
     config_path: str,
     tick: int,
@@ -7216,6 +8200,8 @@ def fork_world_simulation_from_logs(
     source_world_dir = os.path.join(source_simulation_dir, "world")
     source_actions_path = os.path.join(source_world_dir, "actions.jsonl")
     source_snapshots_path = os.path.join(source_world_dir, "state_snapshots.jsonl")
+    source_memory_dir = os.path.join(source_world_dir, "memory")
+    source_actor_memory_updates_path = os.path.join(source_memory_dir, "actor_memory_updates.jsonl")
     if not os.path.exists(source_actions_path):
         raise FileNotFoundError(f"missing world actions log: {source_actions_path}")
     if not os.path.exists(source_snapshots_path):
@@ -7245,6 +8231,8 @@ def fork_world_simulation_from_logs(
     os.makedirs(destination_simulation_dir, exist_ok=False)
     destination_world_dir = os.path.join(destination_simulation_dir, "world")
     os.makedirs(destination_world_dir, exist_ok=True)
+    destination_memory_dir = os.path.join(destination_world_dir, "memory")
+    os.makedirs(destination_memory_dir, exist_ok=True)
 
     source_profiles_path = os.path.join(source_simulation_dir, "world_profiles.json")
     if os.path.exists(source_profiles_path):
@@ -7318,6 +8306,11 @@ def fork_world_simulation_from_logs(
         os.path.join(destination_world_dir, "state_snapshots.jsonl"),
         target_tick,
     )
+    memory_updates_stats = _truncate_actor_memory_updates_log_to_tick(
+        source_actor_memory_updates_path,
+        os.path.join(destination_memory_dir, "actor_memory_updates.jsonl"),
+        target_tick,
+    )
 
     source_checkpoint_path = os.path.join(source_world_dir, "checkpoint.json")
     if os.path.exists(source_checkpoint_path):
@@ -7354,6 +8347,7 @@ def fork_world_simulation_from_logs(
         "restore": restore_result,
         "actions_truncate": actions_stats,
         "snapshots_truncate": snapshots_stats,
+        "actor_memory_updates_truncate": memory_updates_stats,
     }
     with open(os.path.join(destination_simulation_dir, "fork_meta.json"), "w", encoding="utf-8") as f:
         json.dump(fork_meta, f, ensure_ascii=False, indent=2)
@@ -7367,6 +8361,7 @@ def fork_world_simulation_from_logs(
         "new_config_path": destination_config_path,
         "actions_truncate": actions_stats,
         "snapshots_truncate": snapshots_stats,
+        "actor_memory_updates_truncate": memory_updates_stats,
         "restore": restore_result,
     }
 

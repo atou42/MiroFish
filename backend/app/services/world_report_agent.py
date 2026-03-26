@@ -101,8 +101,34 @@ class WorldReportAgent:
         return WORLD_REPORT_LLM_TIMEOUT_SECONDS
 
     def _call_llm_with_hard_timeout(self, fn: Callable[[], Any], *, label: str) -> Any:
-        with _hard_timeout(self._llm_timeout_seconds(), label):
+        timeout_seconds = self._llm_timeout_seconds()
+        if timeout_seconds <= 0:
             return fn()
+
+        result: Dict[str, Any] = {}
+        error: Dict[str, BaseException] = {}
+        finished = threading.Event()
+
+        def _run() -> None:
+            try:
+                result["value"] = fn()
+            except BaseException as exc:  # pragma: no cover - surfaced to caller below
+                error["value"] = exc
+            finally:
+                finished.set()
+
+        worker = threading.Thread(
+            target=_run,
+            name=f"world-report-llm:{label}",
+            daemon=True,
+        )
+        worker.start()
+        finished.wait(timeout_seconds)
+        if not finished.is_set():
+            raise WorldReportLLMTimeoutError(f"{label} timed out after {timeout_seconds:.2f}s")
+        if "value" in error:
+            raise error["value"]
+        return result.get("value")
 
     def generate_report(
         self,

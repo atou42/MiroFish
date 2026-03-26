@@ -30,6 +30,8 @@ def test_world_fork_creates_parallel_simulation(tmp_path: Path, monkeypatch):
     source_sim_dir = tmp_path / "sim_source"
     source_world_dir = source_sim_dir / "world"
     source_world_dir.mkdir(parents=True)
+    source_memory_dir = source_world_dir / "memory"
+    source_memory_dir.mkdir(parents=True)
 
     _write_json(
         source_sim_dir / "simulation_config.json",
@@ -170,6 +172,85 @@ def test_world_fork_creates_parallel_simulation(tmp_path: Path, monkeypatch):
         },
     ]
     _write_jsonl(source_world_dir / "state_snapshots.jsonl", snapshots)
+    _write_jsonl(
+        source_memory_dir / "actor_memory_updates.jsonl",
+        [
+            {
+                "tick": 1,
+                "timestamp": "2026-03-26T01:00:00",
+                "revision": 1,
+                "actor_id": 1,
+                "actor_name": "Actor",
+                "event_id": "event_1",
+                "event_title": "Opening Shock",
+                "summary": "Actor remembers Opening Shock.",
+                "reason": "event_memory",
+                "actor_memory": {
+                    "agent_id": 1,
+                    "entity_name": "Actor",
+                    "entity_type": "Character",
+                    "public_role": "",
+                    "home_location": "",
+                    "standing_drives": ["Survive the fork front"],
+                    "temperament": [],
+                    "episodic_memories": [
+                        {
+                            "memory_id": "mem:event_1:1",
+                            "tick": 1,
+                            "event_id": "event_1",
+                            "event_title": "Opening Shock",
+                            "summary": "Actor remembers Opening Shock.",
+                            "location": "Fork Front",
+                            "tags": ["battle"],
+                            "counterpart_names": [],
+                            "significance": 3,
+                            "valence": "witness",
+                        }
+                    ],
+                    "open_loops": [],
+                    "relationship_tensions": [],
+                    "last_updated_tick": 1,
+                },
+            },
+            {
+                "tick": 3,
+                "timestamp": "2026-03-26T03:00:00",
+                "revision": 2,
+                "actor_id": 1,
+                "actor_name": "Actor",
+                "event_id": "event_3",
+                "event_title": "Final Strike",
+                "summary": "Actor remembers Final Strike.",
+                "reason": "event_memory",
+                "actor_memory": {
+                    "agent_id": 1,
+                    "entity_name": "Actor",
+                    "entity_type": "Character",
+                    "public_role": "",
+                    "home_location": "",
+                    "standing_drives": ["Survive the fork front"],
+                    "temperament": [],
+                    "episodic_memories": [
+                        {
+                            "memory_id": "mem:event_3:1",
+                            "tick": 3,
+                            "event_id": "event_3",
+                            "event_title": "Final Strike",
+                            "summary": "Actor remembers Final Strike.",
+                            "location": "Fork Front",
+                            "tags": ["battle"],
+                            "counterpart_names": [],
+                            "significance": 5,
+                            "valence": "harm",
+                        }
+                    ],
+                    "open_loops": [],
+                    "relationship_tensions": [],
+                    "last_updated_tick": 3,
+                },
+            },
+        ],
+    )
 
     _write_json(source_world_dir / "checkpoint.json", {"run_total_rounds": 10, "target_rounds": 10, "minutes_per_round": 60})
 
@@ -226,6 +307,15 @@ def test_world_fork_creates_parallel_simulation(tmp_path: Path, monkeypatch):
     world_state = json.loads((fork_dir / "world" / "world_state.json").read_text(encoding="utf-8"))
     assert world_state.get("tick") == 2
     assert world_state.get("world_state", {}).get("actor_conditions", {}).get("1", {}).get("status") == "wounded"
+
+    fork_memory_updates = [
+        json.loads(line)
+        for line in (fork_dir / "world" / "memory" / "actor_memory_updates.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["tick"] for row in fork_memory_updates] == [1]
+    fork_memory_state = json.loads((fork_dir / "world" / "memory" / "actor_memory_state.json").read_text(encoding="utf-8"))
+    assert fork_memory_state["actors"]["1"]["episodic_memories"][0]["event_title"] == "Opening Shock"
 
     assert (fork_dir / "fork_meta.json").exists()
 

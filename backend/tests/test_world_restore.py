@@ -301,6 +301,165 @@ def test_restore_world_checkpoint_preserves_actor_conditions_from_snapshot(tmp_p
     assert checkpoint["last_snapshot"]["world_state"]["actor_conditions"]["1"]["status"] == "dead"
 
 
+def test_restore_world_checkpoint_rebuilds_actor_memory_from_updates_log(tmp_path):
+    simulation_dir = tmp_path / "sim_restore_memory"
+    world_dir = simulation_dir / "world"
+    memory_dir = world_dir / "memory"
+    memory_dir.mkdir(parents=True)
+    config_path = _write_config(simulation_dir)
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for agent in config["agent_configs"]:
+        agent["entity_type"] = "Character"
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_jsonl(world_dir / "actions.jsonl", [{"event_type": "simulation_start", "total_rounds": 6}])
+    _write_jsonl(
+        world_dir / "state_snapshots.jsonl",
+        [
+            {
+                "tick": 1,
+                "round": 1,
+                "phase": "tick_complete",
+                "summary": "tick1",
+                "simulated_hours": 1.0,
+                "world_state": {
+                    "tension": 0.71,
+                    "stability": 0.28,
+                    "momentum": 0.64,
+                    "pressure_tracks": {"conflict": 0.73},
+                    "focus_threads": ["Restore Front"],
+                    "last_tick_summary": "tick1",
+                },
+                "metrics": {
+                    "intents_created": 1,
+                    "accepted_events": 1,
+                    "deferred_intents": 0,
+                    "rejected_intents": 0,
+                    "active_events_count": 0,
+                    "queued_events_count": 0,
+                    "completed_events_count": 0,
+                },
+                "active_events": [],
+                "queued_events": [],
+                "recent_completed_events": [],
+            }
+        ],
+    )
+    _write_jsonl(
+        memory_dir / "actor_memory_updates.jsonl",
+        [
+            {
+                "tick": 1,
+                "timestamp": "2026-03-26T01:00:00",
+                "revision": 1,
+                "actor_id": 1,
+                "actor_name": "Actor One",
+                "event_id": "event_001_0001",
+                "event_title": "Harbor Clash",
+                "summary": "Actor One remembers Harbor Clash and wants payback.",
+                "reason": "condition_fallout",
+                "actor_memory": {
+                    "agent_id": 1,
+                    "entity_name": "Actor One",
+                    "entity_type": "Character",
+                    "public_role": "",
+                    "home_location": "",
+                    "standing_drives": ["Hold the harbor"],
+                    "temperament": [],
+                    "episodic_memories": [
+                        {
+                            "memory_id": "mem:event_001_0001:1",
+                            "tick": 1,
+                            "event_id": "event_001_0001",
+                            "event_title": "Harbor Clash",
+                            "summary": "Actor One remembers Harbor Clash and wants payback.",
+                            "location": "Harbor",
+                            "tags": ["battle"],
+                            "counterpart_names": ["Actor Two"],
+                            "significance": 5,
+                            "valence": "harm",
+                        }
+                    ],
+                    "open_loops": [
+                        {
+                            "loop_id": "loop:event_001_0001:1",
+                            "summary": "Finish what Harbor Clash started.",
+                            "status": "active",
+                            "urgency": 5,
+                            "created_tick": 1,
+                            "last_updated_tick": 1,
+                            "event_id": "event_001_0001",
+                            "event_title": "Harbor Clash",
+                            "location": "Harbor",
+                            "tags": ["battle"],
+                            "counterpart_names": ["Actor Two"],
+                        }
+                    ],
+                    "relationship_tensions": [
+                        {
+                            "counterpart_id": 2,
+                            "counterpart_name": "Actor Two",
+                            "trust": 0,
+                            "grievance": 3,
+                            "last_updated_tick": 1,
+                            "last_event_title": "Harbor Clash",
+                            "summary": "Actor One now treats Actor Two as a hostile rival.",
+                        }
+                    ],
+                    "last_updated_tick": 1,
+                },
+            },
+            {
+                "tick": 2,
+                "timestamp": "2026-03-26T02:00:00",
+                "revision": 2,
+                "actor_id": 1,
+                "actor_name": "Actor One",
+                "event_id": "event_002_0001",
+                "event_title": "Late Betrayal",
+                "summary": "This later row should be ignored at tick 1.",
+                "reason": "condition_fallout",
+                "actor_memory": {
+                    "agent_id": 1,
+                    "entity_name": "Actor One",
+                    "entity_type": "Character",
+                    "public_role": "",
+                    "home_location": "",
+                    "standing_drives": ["Hold the harbor"],
+                    "temperament": [],
+                    "episodic_memories": [
+                        {
+                            "memory_id": "mem:event_002_0001:1",
+                            "tick": 2,
+                            "event_id": "event_002_0001",
+                            "event_title": "Late Betrayal",
+                            "summary": "This later row should be ignored at tick 1.",
+                            "location": "Harbor",
+                            "tags": ["betrayal"],
+                            "counterpart_names": ["Actor Two"],
+                            "significance": 4,
+                            "valence": "harm",
+                        }
+                    ],
+                    "open_loops": [],
+                    "relationship_tensions": [],
+                    "last_updated_tick": 2,
+                },
+            },
+        ],
+    )
+
+    result = restore_world_checkpoint_from_logs(str(config_path), tick=1)
+    checkpoint = json.loads((world_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    restored_memory_state = json.loads((memory_dir / "actor_memory_state.json").read_text(encoding="utf-8"))
+
+    assert result["written"] is True
+    assert checkpoint["actor_memory_state"]["actors"]["1"]["episodic_memories"][0]["event_title"] == "Harbor Clash"
+    assert checkpoint["actor_memory_state"]["revision"] == 1
+    assert restored_memory_state["actors"]["1"]["episodic_memories"][0]["event_title"] == "Harbor Clash"
+
+
 def test_restore_world_checkpoint_preserves_dynamic_agents_from_snapshot(tmp_path):
     simulation_dir = tmp_path / "sim_restore_dynamic"
     world_dir = simulation_dir / "world"
